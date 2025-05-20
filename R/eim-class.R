@@ -211,6 +211,8 @@ eim <- function(X = NULL, W = NULL, json_path = NULL) {
 #'
 #' @param seed An optional integer indicating the random seed for the randomized algorithms. This argument is only applicable if `initial_prob = "random"` or `method` is either `"mcmc"` or `"mvn_cdf"`.
 #'
+#' @param group_agg An optional vector of increasing integers from 1 to the number of columns in `W`, specifying how to aggregate groups in `W` before running the EM algorithm. Each value represents the highest column index included in each aggregated group. For example, if `W` has four columns, `group_agg = c(2, 4)` indicates that columns 1 and 2 should be combined into one group, and columns 3 and 4 into another. Defaults to `NULL`, in which case no group aggregation is performed.
+#'
 #' @param mcmc_stepsize An optional integer specifying the step size for the `mcmc`
 #'   algorithm. This parameter is only applicable when `method = "mcmc"` and will
 #'   be ignored otherwise. The default value is `3000`.
@@ -274,6 +276,8 @@ eim <- function(X = NULL, W = NULL, json_path = NULL) {
 #'
 #' Also, if the eim object supplied is created with the function [simulate_election], it also returns the real probability with the name `real_prob`. See [simulate_election].
 #'
+#' If `group_agg` is different than `NULL`, two values are returned: `W_agg` a `(b x a)` matrix with the number of voters of each aggregated group o each ballot-box, and `group_agg` the same input vector.
+#'
 #' @examples
 #' \donttest{
 #' # Example 1: Compute the Expected-Maximization with default settings
@@ -325,6 +329,7 @@ run_em <- function(object = NULL,
                    ll_threshold = as.double(-Inf),
                    seed = NULL,
                    verbose = FALSE,
+                   group_agg = NULL,
                    mcmc_samples = 1000,
                    mcmc_stepsize = 3000,
                    mvncdf_method = "genz",
@@ -356,6 +361,20 @@ run_em <- function(object = NULL,
         stop("run_em: Exact method isn't supported with mismatch")
     }
 
+    # Handle the group aggregation, if provided
+    if (!is.null(group_agg)) {
+        sizes <- diff(c(0, group_agg))
+        rep_labels <- rep(seq_along(sizes), sizes)
+        groups <- split(seq_len(ncol(object$W)), rep_labels)
+        Wagg <- do.call(
+            cbind,
+            lapply(groups, function(cols) rowSums(object$W[, cols, drop = FALSE]))
+        )
+        rownames(Wagg) <- rownames(object$W)
+        object$W_agg <- Wagg
+        object$group_agg <- group_agg
+    }
+
     object$method <- method
 
     # Default values
@@ -373,7 +392,8 @@ run_em <- function(object = NULL,
         object$mvncdf_error <- if ("mvncdf_error" %in% names(all_params)) all_params$mvncdf_error else 1e-6
     }
 
-    RsetParameters(t(object$X), object$W)
+    W <- if (is.null(object$W_agg)) object$W else object$W_agg
+    RsetParameters(t(object$X), W)
 
     resulting_values <- EMAlgorithmFull(
         method,
@@ -391,20 +411,20 @@ run_em <- function(object = NULL,
     )
     # ---------- ... ---------- #
 
+    object$cond_prob <- resulting_values$q
+    object$cond_prob <- aperm(resulting_values$q, perm = c(2, 3, 1)) # Correct dimensions
+    dimnames(object$cond_prob) <- list(
+        colnames(W),
+        colnames(object$X),
+        rownames(object$X)
+    )
     object$prob <- as.matrix(resulting_values$result)
-    dimnames(object$prob) <- list(colnames(object$W), colnames(object$X))
+    dimnames(object$prob) <- list(colnames(W), colnames(object$X))
     object$iterations <- as.numeric(resulting_values$total_iterations)
     object$logLik <- as.numeric(resulting_values$log_likelihood[length(resulting_values$log_likelihood)])
     object$time <- resulting_values$total_time
     object$message <- resulting_values$stopping_reason
     object$status <- as.integer(resulting_values$finish_id)
-    object$cond_prob <- resulting_values$q
-    object$cond_prob <- aperm(resulting_values$q, perm = c(3, 2, 1)) # Correct dimensions
-    dimnames(object$cond_prob) <- list(
-        colnames(object$X),
-        colnames(object$W),
-        rownames(object$X)
-    )
     # Add function arguments
     object$maxiter <- maxiter
     object$maxiter <- maxtime
@@ -496,7 +516,7 @@ bootstrap <- function(object = NULL,
                       X = NULL,
                       W = NULL,
                       json_path = NULL,
-                      nboot = 50,
+                      nboot = 100,
                       allow_mismatch = TRUE,
                       seed = NULL,
                       ...) {
@@ -509,6 +529,20 @@ bootstrap <- function(object = NULL,
         object <- eim(X, W, json_path)
     } else if (!inherits(object, "eim")) {
         stop("Bootstrap: The object must be initialized with the `eim()` function.")
+    }
+
+    # Handle the group aggregation, if provided
+    if (!is.null(all_params$group_agg)) {
+        sizes <- diff(c(0, all_params$group_agg))
+        rep_labels <- rep(seq_along(sizes), sizes)
+        groups <- split(seq_len(ncol(object$W)), rep_labels)
+        Wagg <- do.call(
+            cbind,
+            lapply(groups, function(cols) rowSums(object$W[, cols, drop = FALSE]))
+        )
+        rownames(Wagg) <- rownames(object$W)
+        object$W_agg <- Wagg
+        object$group_agg <- all_params$group_agg
     }
 
     # I need to define the method before on this case
@@ -531,10 +565,11 @@ bootstrap <- function(object = NULL,
     if (!is.null(seed)) set.seed(seed)
 
     # Extract parameters with defaults if missing
+    W <- if (is.null(object$W_agg)) object$W else object$W_agg
     initial_prob <- if (!is.null(all_params$initial_prob)) all_params$initial_prob else "group_proportional"
     maxiter <- if (!is.null(all_params$maxiter)) all_params$maxiter else 1000
     maxtime <- if (!is.null(all_params$maxtime)) all_params$maxtime else 3600
-    param_threshold <- if (!is.null(all_params$param_threshold)) all_params$param_threshold else 0.01
+    param_threshold <- if (!is.null(all_params$param_threshold)) all_params$param_threshold else 0.001
     verbose <- if (!is.null(all_params$verbose)) all_params$verbose else FALSE
 
     # R does a subtle type conversion when handing -Inf. Hence, we'll use a direct assignment
@@ -568,7 +603,7 @@ bootstrap <- function(object = NULL,
     # Call C bootstrap function
     result <- bootstrapAlg(
         t(object$X),
-        object$W,
+        W,
         as.integer(nboot),
         as.character(method),
         as.character(initial_prob),
@@ -585,7 +620,7 @@ bootstrap <- function(object = NULL,
     )
 
     object$sd <- result
-    dimnames(object$sd) <- list(colnames(object$W), colnames(object$X))
+    dimnames(object$sd) <- list(colnames(W), colnames(object$X))
     object$nboot <- nboot
     object$sd[object$sd == 9999] <- Inf
 
@@ -658,8 +693,7 @@ bootstrap <- function(object = NULL,
 #' result$group_agg # c(2 6)
 #' # This means that the resulting group aggregation is conformed by
 #' # two macro-groups: one that has the original groups 1 and 2; and
-#' # a second that has the original groups 3, 4, 5, and 6:
-#' # {[1, 2], [3, 6]}
+#' # a second that has the original groups 3, 4, 5, and 6.
 #'
 #' # Example 2: Using the chilean election results
 #' data(chile_election_2021)
@@ -680,14 +714,13 @@ bootstrap <- function(object = NULL,
 #' solution <- get_agg_proxy(
 #'     X = X, W = W,
 #'     allow_mismatch = TRUE, sd_threshold = 0.03,
-#'     sd_statistic = "average", nboot = 100, seed = 42
+#'     sd_statistic = "average", seed = 42
 #' )
 #'
 #' solution$group_agg # c(3, 4, 5, 6, 8)
 #' # This means that the resulting group aggregation consists of
 #' # five macro-groups: one that includes the original groups 1, 2, and 3;
 #' # three singleton groups (4, 5, and 6); and one macro-group that includes groups 7 and 8.
-#' # {[1, 2, 3], [4], [5], [6], [7, 8]}
 #'
 #' @export
 get_agg_proxy <- function(object = NULL,
@@ -698,7 +731,7 @@ get_agg_proxy <- function(object = NULL,
                           sd_threshold = 0.05,
                           method = "mult",
                           feasible = TRUE,
-                          nboot = 50,
+                          nboot = 100,
                           allow_mismatch = TRUE,
                           seed = NULL, ...) {
     # Retrieve the default values from run_em() as a list
@@ -873,7 +906,7 @@ get_agg_proxy <- function(object = NULL,
 #' # This means that the resulting group aggregation consists of
 #' # two macro-groups: one that includes the original groups 1, 2, and 3;
 #' # the remaining one with groups 4, 5, 6, 7 and 8.
-#' # {[1, 2, 3], [4, 5, 6, 7, 8]}
+#'
 #' \donttest{
 #' # Example 2: Getting an unfeasible result
 #' result2 <- get_agg_opt(
@@ -894,7 +927,7 @@ get_agg_opt <- function(object = NULL,
                         sd_statistic = "maximum",
                         sd_threshold = 0.05,
                         method = "mult",
-                        nboot = 50,
+                        nboot = 100,
                         allow_mismatch = TRUE,
                         seed = NULL,
                         ...) {
@@ -907,6 +940,7 @@ get_agg_opt <- function(object = NULL,
     run_em_args <- modifyList(as.list(run_em_defaults), all_params)
     run_em_args <- run_em_args[names(run_em_args) != "..."] # Remove ellipsis
 
+    if (!is.null(seed)) set.seed(seed) # Set seed for reproducibility
     # Initialize eim object if needed
     if (is.null(object)) {
         object <- eim(X, W, json_path)
@@ -994,6 +1028,13 @@ get_agg_opt <- function(object = NULL,
     col_groups <- split(seq_len(ncol(object$W)), findInterval(seq_len(ncol(object$W)), c(1, result$indices + 2)))
     # Lambda function to add the columns
     # object$W_agg <- as.matrix(sapply(col_groups, function(cols) rowSums(object$W[, cols, drop = FALSE])))
+    object$cond_prob <- result$q
+    object$cond_prob <- aperm(result$q, perm = c(2, 3, 1)) # Correct dimensions
+    dimnames(object$cond_prob) <- list(
+        NULL,
+        colnames(object$X),
+        rownames(object$X)
+    )
     object$W_agg <- do.call(cbind, lapply(col_groups, function(cols) rowSums(object$W[, cols, drop = FALSE])))
     rownames(object$W_agg) <- rownames(object$W)
     object$group_agg <- result$indices + 1 # Use R's index system
@@ -1004,16 +1045,9 @@ get_agg_opt <- function(object = NULL,
     object$time <- result$total_time
     object$message <- result$stopping_reason
     object$status <- as.integer(result$finish_id)
-    object$cond_prob <- result$q
     object$sd <- result$bootstrap_sol
     dimnames(object$sd) <- dimnames(object$prob)
     object$sd[object$sd == 9999] <- Inf
-    object$cond_prob <- aperm(result$q, perm = c(2, 3, 1)) # Correct dimensions
-    dimnames(object$cond_prob) <- list(
-        NULL,
-        colnames(object$X),
-        rownames(object$X)
-    )
     object$method <- method
     object$ll_threshold <- ll_threshold
     object$param_threshold <- param_threshold
@@ -1034,13 +1068,13 @@ get_agg_opt <- function(object = NULL,
     return(object)
 }
 
-#' Performs a matrix-wise Welch's t-test for two eim objects
+#' Performs a matrix-wise Wald test for two eim objects
 #'
-#' This function compares two `eim` objects (or sets of matrices that can be converted to such objects) by computing a Welch's t-test on each component
-#' of their estimated probability matrices (`p`). The Welch test is applied using bootstrap-derived standard deviations, and the result is a matrix
+#' This function compares two `eim` objects (or sets of matrices that can be converted to such objects) by computing a Wald test on each component
+#' of their estimated probability matrices. The Wald test is applied using bootstrap-derived standard deviations, and the result is a matrix
 #' of p-values corresponding to each group-candidate combination.
 #'
-#' It uses Welch's t-test to analyze if there is a significant difference between the estimated probabilities between a treatment and a control set. The test is performed independently for each component of the probability matrix.
+#' It uses Wald test to analyze if there is a significant difference between the estimated probabilities between a treatment and a control set. The test is performed independently for each component of the probability matrix.
 #'
 #' @inheritParams bootstrap
 #'
@@ -1056,10 +1090,10 @@ get_agg_opt <- function(object = NULL,
 #'
 #' @return A list with components:
 #'   - `pvals`: a numeric matrix of p-values with the same dimensions as the estimated probability matrices (`pvals`) from the input objects.
-#'   - `statistic`: a numeric matrix of t-statistics with the same dimensions as the estimated probability matrices (`pvals`).
+#'   - `statistic`: a numeric matrix of z-statistics with the same dimensions as the estimated probability matrices (`pvals`).
 #'   - `eim1` and `eim2`: the original `eim` objects used for comparison.
 #'
-#' Each entry in the pvals matrix is the p-value from Welch's t-test between the corresponding
+#' Each entry in the pvals matrix is the p-value from Wald test between the corresponding
 #' entries of the two estimated probability matrices.
 #'
 #' @details
@@ -1067,56 +1101,50 @@ get_agg_opt <- function(object = NULL,
 #' - Two `eim` objects via `object1` and `object2`, or
 #' - Four matrices: `X1`, `W1`, `X2`, and `W2`, which will be converted into `eim` objects internally.
 #'
-#' The Welch test is computed using the formula:
+#' The Wald test is computed using the formula:
 #'
 #' \deqn{
-#' t_{ij} = \frac{p_{1,ij} - p_{2,ij}}{\sqrt{(s_{1,ij}^2 + s_{2,ij}^2) / n}},
+#' z_{ij} = \frac{p_{1,ij}-p_{2,ij}}{\sqrt{s_{1,ij}^2+s_{2,ij}^2}}
 #' }
-#' In this expression, \eqn{s_{1,ij}^2} and \eqn{s_{2,ij}^2} represent the bootstrap sample variances for the treatment and control sets, respectively, while \eqn{p_{1,ij}} and \eqn{p_{2,ij}} are the corresponding estimated probability matrices obtained via the EM algorithm. The number of bootstrap samples is denoted by \eqn{n}, and the degrees of freedom for each component are calculated using the Welch-Satterthwaite equation
+#' In this expression, \eqn{s_{1,ij}^2} and \eqn{s_{2,ij}^2} represent the bootstrap sample variances for the treatment and control sets, respectively, while \eqn{p_{1,ij}} and \eqn{p_{2,ij}} are the corresponding estimated probability matrices obtained via the EM algorithm.
 #'
 #' @examples
 #' sim1 <- simulate_election(num_ballots = 100, num_candidates = 3, num_groups = 5, seed = 123)
 #' sim2 <- simulate_election(num_ballots = 100, num_candidates = 3, num_groups = 5, seed = 124)
 #'
-#' result <- welchtest(sim1, sim2, nboot = 100)
+#' result <- waldtest(sim1, sim2, nboot = 100)
 #'
 #' # Check which entries are significantly different
 #' which(result$pvals < 0.05, arr.ind = TRUE)
 #'
 #' @export
-welchtest <- function(object1 = NULL,
-                      object2 = NULL,
-                      X1 = NULL,
-                      W1 = NULL,
-                      X2 = NULL,
-                      W2 = NULL,
-                      nboot = 50,
-                      seed = NULL,
-                      alternative = "two.sided",
-                      ...) {
+waldtest <- function(object1 = NULL,
+                     object2 = NULL,
+                     X1 = NULL,
+                     W1 = NULL,
+                     X2 = NULL,
+                     W2 = NULL,
+                     nboot = 100,
+                     seed = NULL,
+                     alternative = "two.sided",
+                     ...) {
     object <- object1
     X <- X1
     W <- W1
     provided <- c(!is.null(X1), !is.null(W1), !is.null(X2), !is.null(W2))
-    if (any(provided) && !all(provided)) {
-        stop(
-            "Invalid input: you must provide all four matrices (X1, W1, X2, W2) ",
-            "if you choose the matrix interface."
-        )
-    }
-    # now your existing logic
+    invalidMat <- any(provided) && !all(provided)
     using_objects <- !is.null(object1) && !is.null(object2)
     using_matrices <- all(provided)
     input_modes <- sum(using_objects, using_matrices)
 
     if (input_modes == 0) {
         stop("Invalid input: must supply two objects or four matrices.")
-    } else if (input_modes > 1) {
-        stop("Invalid input: supply only one interface: objects OR matrices, not both.")
+    } else if (input_modes > 1 || invalidMat) {
+        stop("Invalid input: you must provide either: two eim objects (object1, object2), or four matrices (X1, X2, W1, W2), but not both.")
     }
 
     all_params <- lapply(as.list(match.call(expand.dots = TRUE)), eval, parent.frame())
-    .validate_compute(all_params) # nolint # It would validate nboot too.
+    # .validate_compute(all_params) # nolint # It would validate nboot too.
 
     # Retrieve default values from bootstrap() and update with user parameters
     bootstrap_defaults <- formals(bootstrap)
@@ -1138,12 +1166,12 @@ welchtest <- function(object1 = NULL,
     }
     boot1 <- do.call(bootstrap, c(
         list(object = object),
-        bootstrap_args[!names(bootstrap_args) %in% c("object", "object2", "X", "X2", "W", "W2", "json_path")],
+        bootstrap_args[!names(bootstrap_args) %in% c("object", "object2", "X", "X1", "X2", "W", "W1", "W2", "json_path")],
         list(verbose = FALSE)
     ))
     em1 <- do.call(run_em, c(
         list(object = object),
-        bootstrap_args[!names(bootstrap_args) %in% c("object", "object2", "X", "X2", "W", "W2", "json_path")],
+        bootstrap_args[!names(bootstrap_args) %in% c("object", "object2", "X1", "X", "X2", "W1", "W", "W2", "json_path")],
         list(verbose = FALSE)
     ))
 
@@ -1153,12 +1181,12 @@ welchtest <- function(object1 = NULL,
     # Second object
     boot2 <- do.call(bootstrap, c(
         list(object = object2),
-        bootstrap_args[!names(bootstrap_args) %in% c("object", "object2", "X", "X2", "W", "W2", "json_path")],
+        bootstrap_args[!names(bootstrap_args) %in% c("object", "object2", "X", "X1", "X2", "W", "W1", "W2", "json_path")],
         list(verbose = FALSE)
     ))
     em2 <- do.call(run_em, c(
         list(object = object2),
-        bootstrap_args[!names(bootstrap_args) %in% c("object", "object2", "X", "X2", "W", "W2", "json_path")],
+        bootstrap_args[!names(bootstrap_args) %in% c("object", "object2", "X", "X1", "X2", "W", "W1", "W2", "json_path")],
         list(verbose = FALSE)
     ))
 
@@ -1166,25 +1194,23 @@ welchtest <- function(object1 = NULL,
     var1 <- boot1$sd^2
     var2 <- boot2$sd^2
 
-    se_diff <- sqrt((var1 + var2) / nboot)
-    t_stat <- (em1$prob - em2$prob) / se_diff
+    delta <- em1$prob - em2$prob
+    se_delta <- sqrt(var1 + var2)
 
-    df_num <- ((var1 + var2) / nboot)^2
-    df_den <- ((var1 / nboot)^2) / (nboot - 1) + ((var2 / nboot)^2) / (nboot - 1)
-    df <- df_num / df_den
-
+    z <- delta / se_delta
 
     pvals <- switch(alternative,
-        "two.sided" = 2 * pt(-abs(t_stat), df),
-        "greater"   = pt(-t_stat, df),
-        "less"      = pt(t_stat, df)
+        "two.sided" = 2 * pnorm(-abs(z)),
+        "greater"   = pnorm(-z),
+        "less"      = pnorm(z)
     )
+
     em1$sd <- boot1$sd
     em2$sd <- boot2$sd
 
     result <- list()
     result$pvals <- pvals
-    result$statistic <- t_stat
+    result$statistic <- z
     class(em1) <- "eim"
     class(em2) <- "eim"
     result$eim1 <- em1
@@ -1192,6 +1218,7 @@ welchtest <- function(object1 = NULL,
 
     return(result)
 }
+
 
 #' @description According to the state of the algorithm (either computed or not), it prints a message with its most relevant parameters
 #'
@@ -1410,7 +1437,16 @@ save_eim <- function(object, filename, ...) {
 
         # Dynamically extract all attributes and store them
         for (name in names(object)) {
-            json_data[[name]] <- object[[name]]
+            val <- object[[name]]
+
+            # if it's our 3-D array cond_prob, swap dim 1 ↔ dim 3
+            if (identical(name, "cond_prob") &&
+                is.array(val) &&
+                length(dim(val)) == 3) {
+                val <- aperm(val, perm = c(3, 1, 2))
+            }
+
+            json_data[[name]] <- val
         }
 
         jsonlite::write_json(json_data, filename, pretty = TRUE, auto_unbox = TRUE, digits = 10)

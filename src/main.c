@@ -443,20 +443,20 @@ int checkGroups()
  */
 Matrix EMAlgoritm(Matrix *currentP, const char *q_method, const double convergence, const double LLconvergence,
                   const int maxIter, const double maxSeconds, const bool verbose, double *time, int *iterTotal,
-                  double *logLLarr, double **qVal, int *finishing_reason, QMethodInput inputParams)
+                  double *logLLarr, double **qVal, int *finishing_reason, QMethodInput *inputParams)
 {
     // ---- Error handling is done on getQMethodConfig!
     if (verbose)
     {
         Rprintf("Starting the EM algorithm.\n");
-        Rprintf("The method to calculate the conditional probability will be '%s' with the following "
-                "parameters:\nProbability convergence threshold:\t%f\nLog-likelihood convergence "
-                "threshold:\t%f\nMaximum iterations:\t%d\n",
+        Rprintf("Conditional probability will be estimated using the '%s' method with the following "
+                "parameters:\n- Probability convergence threshold:\t%f\n- Log-likelihood convergence "
+                "threshold:\t%f\n- Maximum number of iterations:\t%d\n",
                 q_method, convergence, LLconvergence, maxIter);
     }
 
     // ---- Define the parameters for the main loop ---- //
-    QMethodConfig config = getQMethodConfig(q_method, inputParams);
+    QMethodConfig config = getQMethodConfig(q_method, *inputParams);
     double newLL;
     double oldLL = -DBL_MAX;
     // ---...--- //
@@ -472,7 +472,7 @@ Matrix EMAlgoritm(Matrix *currentP, const char *q_method, const double convergen
                                    iterTotal, logLLarr, qVal, finishing_reason, inputParams);
         addColumnOfZeros(W, invalidGroup);
         setParameters(X, W);
-        addRowOfZeros(&result, invalidGroup);
+        addRowOfNaN(&result, invalidGroup);
         freeMatrix(&P);
         return result;
     }

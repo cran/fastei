@@ -353,11 +353,12 @@ Matrix testBootstrap(double *quality, const char *set_method, const Matrix *xmat
     if (A != -1)
     {
         mergedMat = A == wmat->cols ? *wmat : mergeColumns(wmat, boundaries, A); // Boundaries is of length A
-        // ---...--- //
-
+                                                                                 // ---...--- //
         // ---- Obtain the bootstrapped results ---- //
+        GetRNGstate();
         standardMat = bootstrapA(xmat, &mergedMat, bootiter, q_method, p_method, convergence, log_convergence, maxIter,
-                                 maxSeconds, false, inputParams);
+                                 maxSeconds, false, &inputParams);
+        PutRNGstate();
         // ---...--- //
     }
     else
@@ -368,8 +369,9 @@ Matrix testBootstrap(double *quality, const char *set_method, const Matrix *xmat
             MATRIX_AT(mergedMat, i, 0) = BALLOTS_VOTES[i];
         }
         // printMatrix(&mergedMat);
-
+        GetRNGstate();
         standardMat = bootSingleMat(xmat, &mergedMat, bootiter, false);
+        PutRNGstate();
     }
 
     // ---- Maximum method ---- //
@@ -393,6 +395,10 @@ Matrix testBootstrap(double *quality, const char *set_method, const Matrix *xmat
         mean /= (double)(standardMat.rows * standardMat.cols);
         *quality = mean;
     }
+
+    if (findNaN(&standardMat))
+        *quality = INFINITY;
+
     return standardMat;
     // ---...--- //
 }
@@ -430,7 +436,7 @@ Matrix aggregateGroups(
     // ---- EM and Bootstrap parameters
     double set_threshold, const char *set_method, bool feasible, int bootiter, const char *p_method,
     const char *q_method, const double convergence, const double log_convergence, const int maxIter, double maxSeconds,
-    const bool verbose, QMethodInput inputParams)
+    const bool verbose, QMethodInput *inputParams)
 {
 
     // ---- Define initial parameters ---- //
@@ -457,7 +463,7 @@ Matrix aggregateGroups(
 
             if (verbose)
             {
-                Rprintf("Group aggregations:\t[");
+                Rprintf("Group aggregation:\t[");
                 for (int k = 0; k < i - 1; k++)
                 {
                     // Sum 1 to the index for using R's indexing
@@ -468,23 +474,23 @@ Matrix aggregateGroups(
             }
             // ---- Calculate the bootstrap matrix according the cutting boundaries
             bootstrapMatrix = testBootstrap(&quality, set_method, xmat, wmat, boundaries, i, bootiter, q_method,
-                                            p_method, convergence, log_convergence, maxIter, maxSeconds, inputParams);
+                                            p_method, convergence, log_convergence, maxIter, maxSeconds, *inputParams);
         }
         // ---- Case where there's no cuts ---- //
         else
         {
             // int *boundaries = Calloc(2, int);
             bootstrapMatrix = testBootstrap(&quality, set_method, xmat, wmat, boundaries, -1, bootiter, q_method,
-                                            p_method, convergence, log_convergence, maxIter, maxSeconds, inputParams);
+                                            p_method, convergence, log_convergence, maxIter, maxSeconds, *inputParams);
         }
-        if (verbose)
+        if (verbose && quality)
         {
-            Rprintf("Standard deviation of the estimated probability matrix:\n");
+            Rprintf("Standard deviation matrix:\n");
             printMatrix(&bootstrapMatrix);
-            Rprintf("Threshold value:\t%.4f\n----------\n", quality);
+            Rprintf("Statistic value:\t%.4f\n----------\n", quality);
         }
         // --- Case it converges
-        if (quality <= set_threshold)
+        if (quality <= set_threshold && quality != INFINITY)
         {
             for (int b = 0; (b < i) & (i != 1); b++)
             {
@@ -500,7 +506,7 @@ Matrix aggregateGroups(
             return bootstrapMatrix;
         }
         // --- Case it is a better candidate than before
-        if (quality < bestValue)
+        if (quality < bestValue && quality != INFINITY)
         {
             for (int b = 0; (b < i) & (i != 1); b++)
             {
@@ -520,20 +526,30 @@ Matrix aggregateGroups(
         }
     }
     freeMatrix(&lastReward);
+    int totalMacrogroups = *cuts;
+    totalMacrogroups += *cuts == -1 ? 2 : 0;
     if (verbose)
     {
-        int totalMacrogroups = *cuts;
-        totalMacrogroups += *cuts == -1 ? 2 : 0;
+        Rprintf("\nNo group aggregation yielded a standard deviation matrix statistic below the specified "
+                "threshold. The aggregation with the lowest statistic was [");
+        for (int k = 0; k < totalMacrogroups; k++)
+        {
+            Rprintf("%d", results[k] + 1);
+            if (k != totalMacrogroups - 1)
+                Rprintf(", ");
+        }
+        Rprintf("] with a value of %.4f — still above the threshold of %.4f.", bestValue, set_threshold);
         if (!feasible)
-            Rprintf(
-                "\nThe maximum threshold value was not accomplished. Returning the results of having %d macro-groups, "
-                "having an statistic of %.4f, corresponding to the lesser threshold.\n",
-                totalMacrogroups, bestValue);
+        {
+            Rprintf("If "
+                    "you would like to retrieve this group aggregation despite its standard deviation matrix statistic "
+                    "being above the threshold, set feasible = FALSE.\n");
+        }
         else
-            Rprintf(
-                "\nNo group aggregation yielded a standard deviation matrix statistic below the specified threshold.\n"
-                "The aggregation with the lowest statistic had a value of %.4f — still above the threshold of %.4f.",
-                bestValue, set_threshold);
+        {
+            Rprintf("Because "
+                    "'feasibile' parameter is set to FALSE, the group aggregation will be returned anyway.\n");
+        }
     }
     // ---...--- //
     *bestResult = true;
@@ -617,7 +633,7 @@ static void enumerateAllPartitions(int start, int G, int *currentBoundaries, int
 
         Matrix finalP = EMAlgoritm(&initP, opts->q_method, opts->convergence, opts->log_convergence, opts->maxIter,
                                    opts->maxSeconds, false, &timeUsed, &totalIter, &logLLs, &qvals, &finishingReason,
-                                   opts->inputParams);
+                                   &opts->inputParams);
 
         double currentLL = (totalIter > 0) ? logLLs : -DBL_MAX;
         if (opts->verbose)
@@ -633,6 +649,10 @@ static void enumerateAllPartitions(int start, int G, int *currentBoundaries, int
         {
             cleanHitAndRun();
         }
+        // else if (strcmp(opts->q_method, "mult") == 0)
+        //{
+        //    cleanMultinomial();
+        //}
         freeMatrix(&initP);
         // free the merged aggregator:
         freeMatrix(&merged);
@@ -648,10 +668,10 @@ static void enumerateAllPartitions(int start, int G, int *currentBoundaries, int
                               opts->bootiter, opts->q_method, opts->p_method, opts->convergence, opts->log_convergence,
                               opts->maxIter, opts->maxSeconds, opts->inputParams);
             // freeMatrix(&bootstrapedMat);
-            if (opts->verbose)
+            if (opts->verbose && qual != INFINITY)
                 Rprintf("Standard deviation statistic:\t%f\n", qual);
             // compute bootstrap & qual …
-            if (qual <= opts->max_qual)
+            if (qual <= opts->max_qual && qual != INFINITY)
             {
                 // free old best
                 if (res->bestBootstrap)
@@ -708,7 +728,7 @@ static void enumerateAllPartitions(int start, int G, int *currentBoundaries, int
 Matrix aggregateGroupsExhaustive(Matrix *xmat, Matrix *wmat, int *results, int *cuts, const char *set_method,
                                  int bootiter, double max_qual, const char *p_method, const char *q_method,
                                  double convergence, double log_convergence, bool verbose, int maxIter,
-                                 double maxSeconds, QMethodInput inputParams, double *outBestLL, double **outBestQ,
+                                 double maxSeconds, QMethodInput *inputParams, double *outBestLL, double **outBestQ,
                                  Matrix **bestBootstrap, double *outBestTime, int *outFinishReason, int *outIterTotal)
 {
     int G = wmat->cols;
@@ -726,7 +746,7 @@ Matrix aggregateGroupsExhaustive(Matrix *xmat, Matrix *wmat, int *results, int *
                               .verbose = verbose,
                               .maxIter = maxIter,
                               .maxSeconds = maxSeconds,
-                              .inputParams = inputParams};
+                              .inputParams = *inputParams};
 
     ExhaustiveResult res = {.bestLogLikelihood = -DBL_MAX,
                             .bestq = NULL,
@@ -751,6 +771,12 @@ Matrix aggregateGroupsExhaustive(Matrix *xmat, Matrix *wmat, int *results, int *
         *cuts = 0;
         if (results)
             results[0] = -1;
+        if (verbose)
+            Rprintf("\nNo group aggregation yielded a standard deviation matrix statistic below the specified "
+                    "threshold. "
+                    "The aggregation with the lowest statistic was still above the threshold of %.4f. As a result, no "
+                    "group aggregation is returned.",
+                    max_qual);
         return createMatrix(1, 1);
     }
 

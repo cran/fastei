@@ -1,6 +1,5 @@
 /*
 Copyright (c) 2025 fastei team
-
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
 in the Software without restriction, including without limitation the rights
@@ -25,6 +24,7 @@ SOFTWARE.
 #include <R_ext/Utils.h> // for R_CheckUserInterrupt()
 #include <Rinternals.h>
 #include <Rmath.h>
+#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <string.h>
@@ -93,7 +93,8 @@ Matrix standardDeviations(Matrix *bootstrapResults, Matrix *sumMatrix, int total
     {
         for (int j = 0; j < sdMatrix.cols; j++)
         {
-            MATRIX_AT(sdMatrix, i, j) = sqrt(sqrt(fabs(MATRIX_AT(sdMatrix, i, j) / (totalIter - 1))));
+            double val = sqrt(MATRIX_AT(sdMatrix, i, j) / (totalIter - 1));
+            MATRIX_AT(sdMatrix, i, j) = val == 0 ? NAN : val;
         }
     }
     return sdMatrix;
@@ -123,7 +124,7 @@ Matrix standardDeviations(Matrix *bootstrapResults, Matrix *sumMatrix, int total
  */
 Matrix bootstrapA(const Matrix *xmat, const Matrix *wmat, int bootiter, const char *q_method, const char *p_method,
                   const double convergence, const double log_convergence, const int maxIter, const double maxSeconds,
-                  const bool verbose, QMethodInput inputParams)
+                  const bool verbose, QMethodInput *inputParams)
 {
 
     // ---- Initial variables
@@ -140,37 +141,22 @@ Matrix bootstrapA(const Matrix *xmat, const Matrix *wmat, int bootiter, const ch
     }
     // ---- Generate the indices for bootstrap ---- //
     int *indices = Calloc(bdim * bootiter, int);
-    GetRNGstate();
     // For each bootstrap replicate i
-    for (int i = 0; i < bootiter; i++)
+sampling:
+    for (int i = 0; i < bdim * bootiter; i++)
     {
-        while (true)
+        indices[i] = (int)(unif_rand() * bdim);
+    }
+    // Check that every index is not the same
+    for (int i = 1; i < bdim * bootiter; i++)
+    {
+        if (indices[i] != indices[i - 1])
+            break;
+        if (i == bdim * bootiter - 1)
         {
-            // Sample bdim picks for this replicate
-            for (int b = 0; b < bdim; b++)
-            {
-                indices[i * bdim + b] = (int)(unif_rand() * bdim);
-            }
-
-            // Check if all picks are identical
-            bool allSame = true;
-            int firstVal = indices[i * bdim];
-            for (int b = 1; b < bdim; b++)
-            {
-                if (indices[i * bdim + b] != firstVal)
-                {
-                    allSame = false;
-                    break;
-                }
-            }
-            // If not all the same, break out. Otherwise re-sample the block.
-            if (!allSame)
-            {
-                break;
-            }
+            goto sampling;
         }
     }
-    PutRNGstate();
     // We want to avoid the case where the same ballot box is drawn FOR EACH placement
     // This has a probability of 1/b^b. Maybe this calculation could be avoided at 6 > ballot boxes,
     // since then it becomes practically 0
@@ -181,10 +167,10 @@ Matrix bootstrapA(const Matrix *xmat, const Matrix *wmat, int bootiter, const ch
     Matrix *results = Calloc(bootiter, Matrix);
     for (int i = 0; i < bootiter; i++)
     {
-        if (verbose && (i % (bootiter / 20) == 0)) // Print every 5% (20 intervals)
+        if (verbose && bootiter > 20 && (i % (bootiter / 20) == 0)) // Print every 5% (20 intervals)
         {
             double progress = (double)i / bootiter * 100;
-            Rprintf("An %.0f%% of iterations have been done.\n", progress);
+            Rprintf("%.0f%% of iterations completed.\n", progress);
         }
         // ---- Declare variables for the current iteration
         Matrix iterX = createMatrix(xmat->rows, xmat->cols);
@@ -224,6 +210,10 @@ Matrix bootstrapA(const Matrix *xmat, const Matrix *wmat, int bootiter, const ch
         {
             cleanHitAndRun();
         }
+        // else if (strcmp(q_method, "mult"))
+        //{
+        //    cleanMultinomial();
+        //}
         Free(qval);         // Check, for a possible segmentation fault
         freeMatrix(&iterP); // Check, for a possible segmentation fault
         freeMatrix(&iterX);
@@ -258,12 +248,10 @@ Matrix bootSingleMat(const Matrix *xmat, const Matrix *wmat, int bootiter, const
     int matsize = xmat->rows;
     // ---- Generate the indices for bootstrap ---- //
     int *indices = Calloc(bdim * bootiter, int);
-    GetRNGstate();
     for (int j = 0; j < samples; j++)
     {
         indices[j] = (int)(unif_rand() * bdim);
     }
-    PutRNGstate();
     // ---...--- //
 
     // ---- Execute the bootstrap algorithm ---- //
