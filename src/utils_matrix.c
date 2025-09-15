@@ -28,9 +28,6 @@ SOFTWARE.
 #include <R_ext/RS.h> /* for R_Calloc/R_Free, F77_CALL */
 #include <Rinternals.h>
 #include <math.h>
-#ifdef _OPENMP
-#include <omp.h> // Parallelization
-#endif
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -235,9 +232,9 @@ void printMatrix(const Matrix *matrix)
         Rprintf("| ");
         for (int j = 0; j < matrix->cols - 1; j++)
         {
-            Rprintf("%.3f\t", MATRIX_AT_PTR(matrix, i, j));
+            Rprintf("%4.3f\t", MATRIX_AT_PTR(matrix, i, j));
         }
-        Rprintf("%.3f", MATRIX_AT_PTR(matrix, i, matrix->cols - 1));
+        Rprintf("%4.3f", MATRIX_AT_PTR(matrix, i, matrix->cols - 1));
         Rprintf(" |\n");
     }
 }
@@ -487,6 +484,7 @@ bool convergeMatrix(const Matrix *matrixA, const Matrix *matrixB, const double c
 
     F77_CALL(dcopy)(&(size), matrixA->data, &incX, diff, &incY);
     F77_CALL(daxpy)(&(size), &alpha, matrixB->data, &incX, diff, &incY);
+
     for (int i = 0; i < size; i++)
     {
         // If there's a value whom convergence is greater than epsilon, the convergence
@@ -1300,15 +1298,12 @@ bool matricesAreEqual(Matrix *a, Matrix *b)
 {
     checkMatrix(a);
     checkMatrix(b);
-    for (int g = 0; g < TOTAL_GROUPS; g++)
-    {
-        for (int c = 0; c < TOTAL_CANDIDATES; c++)
-        {
-            if (MATRIX_AT_PTR(a, g, c) != MATRIX_AT_PTR(b, g, c))
-                return false;
-        }
-    }
-    return true;
+
+    if (a->rows != b->rows || a->cols != b->cols)
+        return false;
+
+    size_t bytes = a->rows * a->cols * sizeof(double);
+    return memcmp(a->data, b->data, bytes) == 0;
 }
 
 /**
@@ -1397,4 +1392,99 @@ void addRowOfNaN(Matrix *matrix, int rowIndex)
         }
     }
     freeMatrix(&temp);
+}
+
+/*
+ *
+ * Int Matrix functions
+ *
+ */
+
+IntMatrix createMatrixInt(int rows, int cols)
+{
+    if (rows <= 0 || cols <= 0)
+    {
+        error("Matrix handling: Invalid matrix dimensions: rows=%d, cols=%d\n", rows, cols);
+    }
+
+    IntMatrix m;
+    m.rows = rows;
+    m.cols = cols;
+
+    m.data = Calloc(rows * cols, int);
+
+    if (!m.data)
+    {
+        error("Matrix handling: Failed to allocate matrix data\n");
+    }
+
+    return m;
+}
+
+IntMatrix copMatrixDI(const Matrix *orig)
+{
+
+    IntMatrix copy = createMatrixInt(orig->rows, orig->cols);
+    int R = orig->rows, C = orig->cols;
+
+    for (int i = 0; i < R; i++)
+    {
+        for (int j = 0; j < C; j++)
+        {
+            double v = MATRIX_AT_PTR(orig, i, j);
+            copy.data[j * R + i] = (int)v; // truncate toward zero
+        }
+    }
+
+    return copy;
+}
+
+IntMatrix copMatrixI(IntMatrix *original)
+{
+    IntMatrix copy = createMatrixInt(original->rows, original->cols);
+
+    // Copy it with a memcpy
+    size_t total_elements = original->rows * original->cols;
+    memcpy(copy.data, original->data, total_elements * sizeof(int));
+
+    return copy;
+
+    return copy;
+}
+
+void freeMatrixInt(IntMatrix *m)
+{
+    // TODO: Implement a validation warning.
+    if (m != NULL && m->data != NULL)
+    {
+        Free(m->data);
+        m->data = NULL;
+    }
+    m->rows = 0;
+    m->cols = 0;
+}
+
+/*
+ * @brief Checks if two IntMatrices are equal.
+ */
+bool matricesAreEqualI(IntMatrix *a, IntMatrix *b)
+{
+    return memcmp(a->data, b->data, sizeof(int) * a->rows * a->cols) == 0;
+}
+
+void printMatrixInt(IntMatrix *matrix)
+{
+
+    Rprintf("Matrix (%dx%d):\n", matrix->rows, matrix->cols);
+
+    for (int i = 0; i < matrix->rows; i++)
+    {
+        Rprintf("| ");
+        for (int j = 0; j < matrix->cols - 1; j++)
+        {
+            Rprintf("%d\t", MATRIX_AT_PTR(matrix, i, j));
+        }
+        Rprintf("%df", MATRIX_AT_PTR(matrix, i, matrix->cols - 1));
+        Rprintf(" |\n");
+    }
 }

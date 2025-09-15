@@ -12,14 +12,6 @@ extern "C"
 #include "utils_hash.h"
 #include "utils_matrix.h"
 
-    // ---- Define a structure to store the Omega sets ---- //
-    typedef struct
-    {
-        uint32_t b;
-        Matrix **data;
-        int *counts;
-        size_t size;
-    } OmegaSet;
 // ---...--- //
 
 // ---- Macro for finding the minimum ---- //
@@ -39,23 +31,28 @@ extern "C"
      * @return A pointer towards the flattened tensor.
      *
      */
-    double *computeQHitAndRun(Matrix const *probabilities, QMethodInput params, double *ll);
+    void computeQHitAndRun(EMContext *ctx, QMethodInput params, double *ll);
 
     /*
      * @brief Precomputes the sets used for the simulation.
      *
-     * Precomputes the sets that are independent from each EM iteration. It is made with parallelism towards the ballot
-     * boxes and with a static assignment for ensuring reproducibility.
+     * Precomputes the sets that are independent from each EM iteration. It is made with parallelism towards the
+     * ballot boxes and with a static assignment for ensuring reproducibility.
      *
      * @param[in] M. The step size between consecutive samples. Note that the direction is assigned randomly.
      * @param[in] S. The amount of samples for each ballot box.
      *
      * @return void. Written on the global variable.
      */
-    void generateOmegaSet(int M, int S);
+    void generateOmegaSet(EMContext *ctx, int M, int S, int burnIn);
 
-    void preComputeMultinomial(void);
-    void cleanHitAndRun(void);
+    double preMultinomialCoeff(EMContext *ctx, const int b, IntMatrix *currentMatrix);
+
+    void preComputeMultinomial(EMContext *ctx);
+
+    void encode(EMContext *ctx);
+
+    void precomputeQConstant(EMContext *ctx, int size);
 
 #ifdef __cplusplus
 }

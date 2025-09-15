@@ -1,8 +1,8 @@
 Package: fastei
 Title: Methods for ''A Fast Alternative for the R x C Ecological
         Inference Case''
-Version: 0.0.0.9
-Authors@R: c(person(given = "Charles", family = "Thraves", role = "aut"),
+Version: 0.0.0.10
+Authors@R: c(person(given = "Charles", family = "Thraves", role = "aut", email = "ctharves@dii.uchile.cl", comment = c(ORCID = "0000-0001-7491-7477")),
              person(given = "Pablo", family = "Ubilla", role = "aut"),
              person(given = "Daniel", family = "Hermosilla", role = c("aut", "cre"), email = "daniel.hermosilla.r@ug.uchile.cl"),
 			 person(given = "Hanson", family = "Troy", role = c("ctb","cph")))
@@ -19,12 +19,12 @@ Suggests: knitr, rmarkdown, ggplot2, reshape2, viridis, dplyr, qpdf
 VignetteBuilder: knitr
 Depends: R (>= 3.5)
 LazyData: true
-RoxygenNote: 7.3.2
-Packaged: 2025-07-19 02:22:29 UTC; daniel
-Author: Charles Thraves [aut],
+RoxygenNote: 7.3.3
+Packaged: 2025-09-15 22:45:10 UTC; daniel
+Author: Charles Thraves [aut] (ORCID: <https://orcid.org/0000-0001-7491-7477>),
   Pablo Ubilla [aut],
   Daniel Hermosilla [aut, cre],
   Hanson Troy [ctb, cph]
 Maintainer: Daniel Hermosilla <daniel.hermosilla.r@ug.uchile.cl>
 Repository: CRAN
-Date/Publication: 2025-07-19 02:40:02 UTC
+Date/Publication: 2025-09-15 23:10:02 UTC

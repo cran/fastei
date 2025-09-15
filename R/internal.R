@@ -34,14 +34,14 @@
     }
 
     # Method argument
-    valid_methods <- c("mcmc", "exact", "mvn_cdf", "mvn_pdf", "mult")
+    valid_methods <- c("mcmc", "exact", "mvn_cdf", "mvn_pdf", "mult", "metropolis")
     if ("method" %in% names(args) &&
         (!is.character(args$method) || length(args$method) != 1 || !(args$method %in% valid_methods))) {
         stop("Invalid 'method'. Must be one of: ", paste(valid_methods, collapse = ", "))
     }
 
     # Initial prob argument
-    valid_p_methods <- c("group_proportional", "proportional", "uniform", "random")
+    valid_p_methods <- c("group_proportional", "proportional", "uniform", "random", "mult", "mcmc", "mvn_cdf", "mvn_pdf", "exact")
     if ("initial_prob" %in% names(args) &&
         (!is.character(args$initial_prob) || length(args$initial_prob) != 1 || !(args$initial_prob %in% valid_p_methods))) {
         stop("Invalid 'initial_prob'. Must be one of: ", paste(valid_p_methods, collapse = ", "))
@@ -73,6 +73,9 @@
         if (args$param_threshold >= 1) {
             warning("Warning: A 'param_threshold' greater or equal than one will always be true after the first iteration.")
         }
+        if ("compute_ll" %in% names(args) && !args$compute_ll && is.infinite(args$param_threshold)) {
+            stop("You must provide a parameter threshold if 'compute_ll' is FALSE.")
+        }
     }
 
     # Verbose argument
@@ -94,6 +97,12 @@
     if ("samples" %in% names(args) &&
         (!is.numeric(args$mcmc_samples) || as.integer(args$mcmc_samples) != args$mcmc_samples || args$mcmc_samples < 0)) {
         stop("run_em: Invalid 'mcmc_samples'. Must be a positive integer.")
+    }
+
+    # metropolis: Samples argument
+    if ("metropolis_iter" %in% names(args) &&
+        (!is.numeric(args$metropolis_iter) || as.integer(args$metropolis_iter) != args$metropolis_iter || args$metropolis_iter < 0)) {
+        stop("run_em: Invalid 'metropolis_iter'. Must be a positive integer.")
     }
 
     # CDF: Mc_method argument
@@ -147,6 +156,21 @@
 
     if ("alternative" %in% names(args) && !args$alternative %in% c("two.sided", "greater", "less")) {
         stop("Invalid 'alternative'. Must be one of: two.sided, greater, less")
+    }
+
+    valid_lp_methods <- c("", "lp", "project_lp")
+    if ("adjust_prob_cond_method" %in% names(args) &&
+        (!is.character(args$adjust_prob_cond_method) || !(args$adjust_prob_cond_method %in% valid_lp_methods))) {
+        stop("Invalid 'adjust_prob_cond_method'. Must be one of: ", paste(valid_lp_methods, collapse = ", "))
+    }
+
+    if ("adjust_prob_cond_every" %in% names(args)) {
+        if (!is.logical(args$adjust_prob_cond_every)) {
+            stop("Invalid 'adjust_prob_cond_every'. Must be a boolean value.")
+        }
+        if ("adjust_prob_cond_method" %in% names(args) && args$adjust_prob_cond_method == "") {
+            warning("You provided 'adjust_prob_cond_every' but not 'adjust_prob_cond_method'. The former will be ignored.")
+        }
     }
 }
 
@@ -257,7 +281,7 @@
 #' \item{groups}{The number of demographic groups that were drawn.}
 #' \item{total_votes}{A vector with the number of total votes per ballot box.}
 #'
-#' @seealso [simulate_elections()]
+#' @seealso [simulate_election()]
 #' @examples
 #'
 #' bal_range <- c(30, 50)

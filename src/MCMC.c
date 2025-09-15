@@ -20,7 +20,7 @@ OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 */
 
-#include "hitAndRun.h"
+#include "MCMC.h"
 #include "globals.h"
 #include <R.h>
 #include <R_ext/Memory.h>
@@ -40,12 +40,12 @@ SOFTWARE.
 #define Free(p) R_chk_free((void *)(p))
 #endif
 
-OmegaSet **OMEGASET = NULL; // Global pointer to store all H sets
-double **multinomialVals = NULL;
-double *logGammaArr = NULL;
-double **Qconstant = NULL;
+// ctx->omegaset **OMEGASET = NULL; // Global pointer to store all H sets
+// double **multinomialVals = NULL;
+// double *logGammaArr = NULL;
+// double **Qconstant = NULL;
 
-int lessThanColRow(Matrix mat, int b, int g, int c, int candidateVotes, int groupVotes)
+int lessThanColRow(IntMatrix mat, int b, int g, int c, int candidateVotes, int groupVotes)
 {
     int groupSum = 0;
     int canSum = 0;
@@ -63,42 +63,12 @@ int lessThanColRow(Matrix mat, int b, int g, int c, int candidateVotes, int grou
     return MIN(slackC, slackG);
 }
 
-void saveOmegaSetToCSV(const char *filename)
+IntMatrix startingPoint3(EMContext *ctx, int b)
 {
-    FILE *f = fopen(filename, "w");
-    if (!f)
-    {
-        Rprintf("Error opening file %s for writing.\n", filename);
-        return;
-    }
-
-    // Header
-    fprintf(f, "b,s,g,c,value\n");
-
-    for (uint32_t b = 0; b < TOTAL_BALLOTS; b++)
-    {
-        OmegaSet *set = OMEGASET[b];
-        for (size_t s = 0; s < set->size; s++)
-        {
-            Matrix *mat = set->data[s];
-            for (uint16_t g = 0; g < mat->rows; g++)
-            {
-                for (uint16_t c = 0; c < mat->cols; c++)
-                {
-                    fprintf(f, "%u,%zu,%u,%u,%.0f\n", b, s, g, c, MATRIX_AT_PTR(mat, g, c));
-                }
-            }
-        }
-    }
-
-    fclose(f);
-    Rprintf("OmegaSet saved to %s\n", filename);
-}
-
-Matrix startingPoint3(int b)
-{
+    Matrix *X = &ctx->X;
+    Matrix *W = &ctx->W;
     // ---- Retrieve the initial variables ---- //
-    Matrix toReturn = createMatrix(TOTAL_GROUPS, TOTAL_CANDIDATES);
+    IntMatrix toReturn = createMatrixInt(TOTAL_GROUPS, TOTAL_CANDIDATES);
     double *groupVotes = getRow(W, b);
     double *candidateVotes = getColumn(X, b);
 
@@ -123,7 +93,7 @@ Matrix startingPoint3(int b)
     // ---...--- //
 
     // ---- Division for mismatchs ---- //
-    double divide = MAX(BALLOTS_VOTES[b], totalC);
+    double divide = MAX(ctx->ballots_votes[b], totalC);
     divide = MAX(divide, totalG);
 
     for (uint16_t g = 0; g < TOTAL_GROUPS; g++)
@@ -151,7 +121,6 @@ Matrix startingPoint3(int b)
             }
         }
     }
-    // ---...--- //
 
     // ---...--- //
     Free(groupVotes);
@@ -189,6 +158,7 @@ void allocateRandoms(int M, int S, uint8_t **c1, uint8_t **c2, uint8_t **g1, uin
     }
     PutRNGstate(); // Finalize RNG state to prevent repeatability
 }
+
 /*
  * @brief Precomputes the sets used for the simulation.
  *
@@ -200,10 +170,10 @@ void allocateRandoms(int M, int S, uint8_t **c1, uint8_t **c2, uint8_t **g1, uin
  *
  * @return void. Written on the global variable.
  */
-void generateOmegaSet(int M, int S)
+void generateOmegaSet(EMContext *ctx, int M, int S, int burnIn)
 {
     // ---- Allocate memory for the `b` index ----
-    OMEGASET = Calloc(TOTAL_BALLOTS, OmegaSet *);
+    ctx->omegaset = Calloc(TOTAL_BALLOTS, OmegaSet *);
     uint8_t *c1 = NULL;
     uint8_t *c2 = NULL;
     uint8_t *g1 = NULL;
@@ -222,47 +192,41 @@ void generateOmegaSet(int M, int S)
 #pragma omp parallel for
 #endif
     for (uint32_t b = 0; b < TOTAL_BALLOTS; b++)
-    {                               // ---- For every ballot box
-        if (b % 5 == 0)             // Checks condition every 5 iterations
-            R_CheckUserInterrupt(); // This might be fatal, since it doesn't free global memory
+    { // ---- For every ballot box
+        // if (b % 5 == 0)             // Checks condition every 5 iterations
+        // R_CheckUserInterrupt(); // This might be fatal, since it doesn't free global memory
         // ---- Define a seed, that will be unique per thread ----
         //    unsigned int seed = rand_r(&seedNum) + omp_get_thread_number();
-        // ---- Allocate memory for the OmegaSet ---- //
-        OMEGASET[b] = Calloc(1, OmegaSet);
-        OMEGASET[b]->b = b;
-        OMEGASET[b]->size = S;
-        OMEGASET[b]->data = Calloc(S, Matrix *);
+        // ---- Allocate memory for the ctx->omegaset ---- //
+        ctx->omegaset[b] = Calloc(1, OmegaSet);
+        ctx->omegaset[b]->b = b;
+        ctx->omegaset[b]->size = S;
+        ctx->omegaset[b]->data = Calloc(S, IntMatrix);
+        // ctx->omegaset[b]->data = Calloc(S, IntMatrix *);
         // ---...--- //
         // ---- The `base` element used as a starting point ----
-        Matrix startingZ = startingPoint3(b);
-        if (b % 5 == 0)
-        {
-            int totalVals = 0;
-            for (int g = 0; g < TOTAL_GROUPS; g++)
-            {
-                for (int c = 0; c < TOTAL_CANDIDATES; c++)
-                {
-                    totalVals += MATRIX_AT(startingZ, g, c);
-                }
-            }
-        }
+        IntMatrix startingZ = startingPoint3(ctx, b);
         int ballotShift = floor(((double)b / TOTAL_BALLOTS) * (M * S));
 
         // Impose the first step
-        Matrix *append = Calloc(1, Matrix);
-        *append = copMatrix(&startingZ);
-        OMEGASET[b]->data[0] = append;
-        freeMatrix(&startingZ);
+        // IntMatrix *append = Calloc(1, IntMatrix);
+        // *append = copMatrixI(&startingZ);
+        // ctx->omegaset[b]->data[0] = append;A
+        ctx->omegaset[b]->data[0] = copMatrixI(&startingZ);
+        freeMatrixInt(&startingZ);
 
-        for (int s = 1; s < S; s++)
-        {                                // --- For each sample given a ballot box
-            if (S > 5000 && S % 50 == 0) // If there's a big amount of samples, check interrupts
-                R_CheckUserInterrupt();
-            // TODO: El sampling debe hacerse de tamaño M*S
+        int Mtotal = burnIn;
+        IntMatrix steppingZ;
+        for (int s = 0; s < S; s++)
+        { // --- For each sample given a ballot box
             // ---- Copy the initial matrix ----
-            Matrix *pastMatrix = OMEGASET[b]->data[s - 1];
-            Matrix steppingZ = copMatrix(pastMatrix);
-            for (int m = 0; m < M; m++)
+            // IntMatrix pastMatrix = ctx->omegaset[b]->data[s - 1];
+            // IntMatrix steppingZ = copMatrixI(&pastMatrix);
+            if (s != 0)
+                steppingZ = copMatrixI(&ctx->omegaset[b]->data[s - 1]);
+            else
+                steppingZ = ctx->omegaset[b]->data[0];
+            for (int m = 0; m < Mtotal; m++)
             { // --- For each step size given a sample and a ballot box
                 // ---- Sample random indexes ---- //
                 int shiftIndex = (s * M + ballotShift + m) % (M * S);
@@ -289,11 +253,12 @@ void generateOmegaSet(int M, int S)
                 MATRIX_AT(steppingZ, randomGDraw2, randomCDraw) += 1;
                 //  ---...--- //
             } // --- End the step size loop
-            // ---- Add the combination to the OmegaSet ---- //
-            Matrix *append = Calloc(1, Matrix);
-            *append = copMatrix(&steppingZ);
-            OMEGASET[b]->data[s] = append;
-            freeMatrix(&steppingZ);
+            Mtotal = M;
+            // ---- Add the combination to the ctx->omegaset ---- //
+            // IntMatrix *append = Calloc(1, IntMatrix);
+            // *append = copMatrixI(&steppingZ);
+            ctx->omegaset[b]->data[s] = steppingZ;
+            // freeMatrixInt(&steppingZ);
             // ---...--- //
         } // --- End the sample loop
         // freeMatrix(&startingZ);
@@ -304,11 +269,11 @@ void generateOmegaSet(int M, int S)
     Free(g2);
 }
 
-void encode()
+void encode(EMContext *ctx)
 {
     for (int b = 0; b < TOTAL_BALLOTS; b++)
     {
-        OmegaSet *set = OMEGASET[b];
+        OmegaSet *set = ctx->omegaset[b];
         int S = set->size;
 
         MatrixHash *hashTable = NULL;
@@ -316,8 +281,8 @@ void encode()
         // First pass: identify and count unique matrices
         for (int s = 0; s < S; s++)
         {
-            Matrix *current = set->data[s];
-            unsigned int key = computeMatrixKey(current);
+            IntMatrix current = set->data[s];
+            unsigned int key = computeMatrixKey(&current);
 
             MatrixHash *entry = NULL;
             HASH_FIND(hh, hashTable, &key, sizeof(unsigned int), entry);
@@ -325,7 +290,7 @@ void encode()
             int found = 0;
             for (MatrixHash *iter = entry; iter != NULL; iter = iter->hh.next)
             {
-                if (iter->key == key && matricesAreEqual(iter->matrix, current))
+                if (iter->key == key && matricesAreEqualI(iter->matrix, &current))
                 {
                     iter->count++;
                     found = 1;
@@ -337,7 +302,7 @@ void encode()
             {
                 MatrixHash *newEntry = Calloc(1, MatrixHash);
                 newEntry->key = key;
-                newEntry->matrix = current;
+                newEntry->matrix = &current;
                 newEntry->count = 1;
                 HASH_ADD(hh, hashTable, key, sizeof(unsigned int), newEntry);
             }
@@ -351,15 +316,15 @@ void encode()
 
         for (int s = 0; s < S; s++)
         {
-            Matrix *current = set->data[s];
-            unsigned int key = computeMatrixKey(current);
+            IntMatrix current = set->data[s];
+            unsigned int key = computeMatrixKey(&current);
 
             MatrixHash *entry = NULL;
             HASH_FIND(hh, hashTable, &key, sizeof(unsigned int), entry);
 
             for (MatrixHash *iter = entry; iter != NULL; iter = iter->hh.next)
             {
-                if (iter->key == key && matricesAreEqual(iter->matrix, current))
+                if (iter->key == key && matricesAreEqualI(iter->matrix, &current))
                 {
                     set->counts[s] = iter->count; // All duplicates now get the same count
                     break;
@@ -381,7 +346,7 @@ void encode()
 /**
  * @brief Computes the pre-computable values of the expression that doesn't depend on EM iterations
  *
- * Given a ballot box index and a matrix represent an element from the Hit and Run OmegaSet, it computes the
+ * Given a ballot box index and a matrix represent an element from the Hit and Run ctx->omegaset, it computes the
  * following:
  *
  * $$\Prod_{g'\in G}\binom{w_{bg'}}{z_{bg'1}\cdots z_{bg'C}}$$
@@ -391,14 +356,17 @@ void encode()
  *
  * double The result of the calculation.
  */
-double preMultinomialCoeff(const int b, Matrix *currentMatrix)
+double preMultinomialCoeff(EMContext *ctx, const int b, IntMatrix *currentMatrix)
 {
+    Matrix *W = &ctx->W;          // Get the W matrix
+    IntMatrix *intW = &ctx->intW; // Get the W matrix in integer form
+
     double result = 0;
     for (uint16_t g = 0; g < TOTAL_GROUPS; g++)
     {
         // --- Compute ln(w_bf!). When adding by one, it considers the last element too ---
         // result += gsl_sf_lngamma((int)MATRIX_AT_PTR(W, b, g) + 1);
-        result += lgamma1p((int)MATRIX_AT_PTR(W, b, g)); // TODO: Could be saved
+        result += lgamma1p(MATRIX_AT_PTR(intW, b, g)); // TODO: Could be saved
 
         for (uint16_t i = 0; i < TOTAL_CANDIDATES; i++)
         { // ---- For each candidate
@@ -412,25 +380,25 @@ double preMultinomialCoeff(const int b, Matrix *currentMatrix)
 }
 
 /**
- * @brief Calculates the last term of the multiplication OmegaSet
+ * @brief Calculates the last term of the multiplication ctx->omegaset
  *
- * Given a probability matrix, a ballot index and a OmegaSet index, it calculates:
+ * Given a probability matrix, a ballot index and a ctx->omegaset index, it calculates:
  *
  * $$\Prod_{g\in G}\Prod_{c\in C}p_{gc}^{z_{bgc}}$$
  *
  * @param[in] *probabilities A pointer toward the probabilities Matrix.
  * @param[in] b The index of the ballot box
- * @param[in] setIndex The index of the OmegaSet
+ * @param[in] setIndex The index of the ctx->omegaset
  *
  * @return double: The result of the product
  *
  */
-double logarithmicProduct(const Matrix *probabilities, const int b, const int setIndex)
+double logarithmicProduct(EMContext *ctx, const int b, const int setIndex)
 {
-    // TODO: logPRod
+    Matrix *probabilities = &ctx->probabilities; // Get the probabilities matrix
     // ---- Define initial parameters ---- //
     double log_result = 0;
-    Matrix *currentMatrix = OMEGASET[b]->data[setIndex]; // Z
+    IntMatrix currentMatrix = ctx->omegaset[b]->data[setIndex]; // Z
     // ---...--- //
     // ---- Main computation ---- //
     for (uint16_t c = 0; c < TOTAL_CANDIDATES; c++)
@@ -440,23 +408,11 @@ double logarithmicProduct(const Matrix *probabilities, const int b, const int se
             // Cambiar a log(1) if probabilidad 0
             // Producto punto
             double prob = MATRIX_AT_PTR(probabilities, g, c);
-            log_result += (prob > 0.0) ? MATRIX_AT_PTR(currentMatrix, g, c) * log(prob) : 0.0;
+            log_result += (prob > 0.0) ? MATRIX_AT(currentMatrix, g, c) * log(prob) : 0.0;
         }
     }
     // --- ... --- //
     return log_result;
-}
-
-void precomputeLogGammas()
-{
-    // We must get the biggest W_{bg}
-    int biggestW = (int)maxElement(W);
-    logGammaArr = (double *)Calloc(biggestW + 1, double);
-
-    for (int i = 0; i <= biggestW; i++)
-    {
-        logGammaArr[i] = lgamma1p(i);
-    }
 }
 
 /**
@@ -471,43 +427,45 @@ void precomputeLogGammas()
  *
  * @return. Results written at the global variable
  */
-void preComputeMultinomial(void)
+void preComputeMultinomial(EMContext *ctx)
 {
     // ---- Initialize space for storing all of the simulations ---- //
-    multinomialVals = Calloc(TOTAL_BALLOTS, double *);
+    ctx->multinomial = Calloc(TOTAL_BALLOTS, double *);
     // ---...--- //
-    // ---- Compute the simulated combinations for each OmegaSet ---- //
+    // ---- Compute the simulated combinations for each ctx->omegaset ---- //
     for (uint32_t b = 0; b < TOTAL_BALLOTS; b++)
     { // --- For each ballot box
-        // ---- Define the current OmegaSet and allocate memory for saving its size ----
-        OmegaSet *currentSet = OMEGASET[b];
-        multinomialVals[b] = Calloc(currentSet->size, double);
+        // ---- Define the current ctx->omegaset and allocate memory for saving its size ----
+        OmegaSet *currentSet = ctx->omegaset[b];
+        ctx->multinomial[b] = Calloc(currentSet->size, double);
         for (size_t s = 0; s < currentSet->size; s++)
         { // --- For each simulation given a balot box
-            multinomialVals[b][s] = preMultinomialCoeff(b, currentSet->data[s]);
+            ctx->multinomial[b][s] = preMultinomialCoeff(ctx, b, &currentSet->data[s]);
         }
     }
 }
 
-void precomputeQConstant(int size)
+void precomputeQConstant(EMContext *ctx, int size)
 {
-    Qconstant = Calloc(TOTAL_BALLOTS, double *);
+    IntMatrix *intW = &ctx->intW; // Get the W matrix in integer form
+    ctx->Qconstant = Calloc(TOTAL_BALLOTS, double *);
+
     for (uint32_t b = 0; b < TOTAL_BALLOTS; b++)
     {
-        // ---- Define the current OmegaSet and allocate memory for saving its size ----
-        OmegaSet *currentSet = OMEGASET[b];
-        Qconstant[b] = Calloc(currentSet->size, double);
+        // ---- Define the current ctx->omegaset and allocate memory for saving its size ----
+        OmegaSet *currentSet = ctx->omegaset[b];
+        ctx->Qconstant[b] = Calloc(currentSet->size, double);
         for (size_t s = 0; s < currentSet->size; s++)
         { // --- For each simulation given a balot box
-            Matrix sampleValue = *currentSet->data[s];
-            Qconstant[b][s] = 0;
+            IntMatrix sampleValue = currentSet->data[s];
+            ctx->Qconstant[b][s] = 0;
             for (uint16_t g = 0; g < TOTAL_GROUPS; g++)
             {
-                int W_bg = (int)MATRIX_AT_PTR(W, b, g);
-                Qconstant[b][s] += logGammaArr[W_bg];
+                int W_bg = MATRIX_AT_PTR(intW, b, g);
+                ctx->Qconstant[b][s] += ctx->logGamma[W_bg];
                 for (uint16_t c = 0; c < TOTAL_CANDIDATES; c++)
                 {
-                    Qconstant[b][s] -= logGammaArr[(int)MATRIX_AT(sampleValue, g, c)];
+                    ctx->Qconstant[b][s] -= ctx->logGamma[(int)MATRIX_AT(sampleValue, g, c)];
                 }
             }
         }
@@ -518,9 +476,12 @@ void precomputeQConstant(int size)
  * Computes the big 'Q' for the log-likelihood.
  * This value needs to be aggregated to the log-likelihood
  */
-double computeQ(double *q, Matrix const *probabilities)
+double computeQ(EMContext *ctx)
 {
-
+    Matrix *probabilities = &ctx->probabilities; // Get the probabilities matrix
+    double *q = ctx->q;                          // Get the q array
+    Matrix *W = &ctx->W;                         // Get the W matrix
+    IntMatrix *intW = &ctx->intW;                // Get the W matrix in integer form
     // double thirdTerm = underflowSum(q);
     // double total = -thirdTerm;
     double total = 0;
@@ -530,8 +491,8 @@ double computeQ(double *q, Matrix const *probabilities)
     {
         for (uint16_t g = 0; g < TOTAL_GROUPS; g++)
         {
-            int w_bg = (int)MATRIX_AT_PTR(W, b, g);
-            borrar += w_bg == 0 ? 0 : logGammaArr[w_bg];
+            int w_bg = MATRIX_AT_PTR(intW, b, g);
+            borrar += w_bg == 0 ? 0 : ctx->logGamma[w_bg];
             // total += w_bg == 0 ? 0 : logGammaArr[w_bg]; // Second term
             double qsum = 0;
             double firstTerm = 0;
@@ -551,38 +512,23 @@ double computeQ(double *q, Matrix const *probabilities)
     return total;
 }
 
-double *computeQHitAndRun(Matrix const *probabilities, QMethodInput params, double *ll)
+void computeQHitAndRun(EMContext *ctx, QMethodInput params, double *ll)
 {
-    // ---- Compute the variables that can be reused ---- //
-    if (OMEGASET == NULL)
-    {
-        generateOmegaSet(params.M, params.S);
-        encode();
-        // saveOmegaSetToCSV("omegaset.csv");
-        // error("saved");
-    }
-    if (multinomialVals == NULL)
-    {
-        preComputeMultinomial();
-    }
-    if (logGammaArr == NULL)
-    {
-        precomputeLogGammas();
-    }
-    if (Qconstant == NULL)
-    {
-        precomputeQConstant(params.S);
-    }
+    *ll = 0;
+    Matrix *X = &ctx->X;
+    Matrix *W = &ctx->W;
+    IntMatrix *intX = &ctx->intX;
+    IntMatrix *intW = &ctx->intW;
+    double *q = ctx->q;
+    Matrix *probabilities = &ctx->probabilities;
     // ---...--- //
 
-    // ---- Compute the final values and fill the returning array ---- //
-    double *array2 = (double *)Calloc(TOTAL_BALLOTS * TOTAL_CANDIDATES * TOTAL_GROUPS, double); // Array to return
     // ---- Use a static assignment since the workload is even between threads ----
 
     *ll = 0;
     for (uint32_t b = 0; b < TOTAL_BALLOTS; b++)
     { // --- For each ballot box
-        OmegaSet *currentSet = OMEGASET[b];
+        OmegaSet *currentSet = ctx->omegaset[b];
         double *multiplicationValues = (currentSet->size <= 10000) ? (double[10000]){1}                // Stack
                                                                    : Calloc(currentSet->size, double); // Heap
         for (uint16_t g = 0; g < TOTAL_GROUPS; g++)
@@ -592,7 +538,7 @@ double *computeQHitAndRun(Matrix const *probabilities, QMethodInput params, doub
             {
                 for (uint16_t c = 0; c < TOTAL_CANDIDATES; c++)
                 {
-                    Q_3D(array2, b, g, c, (int)TOTAL_GROUPS, (int)TOTAL_CANDIDATES) = 0;
+                    Q_3D(q, b, g, c, (int)TOTAL_GROUPS, (int)TOTAL_CANDIDATES) = 0;
                 }
                 continue;
             }
@@ -600,10 +546,10 @@ double *computeQHitAndRun(Matrix const *probabilities, QMethodInput params, doub
             // --- Precompute multiplicationValues for this (b, g) combination ---
             double max = -DBL_MAX;
             for (size_t s = 0; s < currentSet->size; s++)
-            {                                                // --- For each sample given a group and a ballot box
-                Matrix *currentMatrix = currentSet->data[s]; // Z
-                double a_i = logarithmicProduct(probabilities, b, s) +
-                             multinomialVals[b][s]; // $\sum_{g\in G}\sum_{c\in C}z_{bgc}*\log(p_{gc})+$
+            {                                                  // --- For each sample given a group and a ballot box
+                IntMatrix currentMatrix = currentSet->data[s]; // Z
+                double a_i = logarithmicProduct(ctx, b, s) +
+                             ctx->multinomial[b][s]; // $\sum_{g\in G}\sum_{c\in C}z_{bgc}*\log(p_{gc})+$
                 multiplicationValues[s] = a_i;
 
                 max = multiplicationValues[s] > max ? multiplicationValues[s] : max;
@@ -623,12 +569,12 @@ double *computeQHitAndRun(Matrix const *probabilities, QMethodInput params, doub
                 {                                     // --- For each sample
                     v = exp(multiplicationValues[i]); // exp(ls - m)
                     sum_exp_num += v;
-                    Matrix *currentMatrix = currentSet->data[i];
-                    sum_exp_den += (MATRIX_AT_PTR(currentMatrix, g, c) / W_bg) * v;
+                    IntMatrix currentMatrix = currentSet->data[i];
+                    sum_exp_den += (MATRIX_AT(currentMatrix, g, c) / W_bg) * v;
                 }
                 double log_sum_exp_num = log(sum_exp_num);
                 double result = exp(log(sum_exp_den) - log_sum_exp_num);
-                Q_3D(array2, b, g, c, (int)TOTAL_GROUPS, (int)TOTAL_CANDIDATES) =
+                Q_3D(q, b, g, c, (int)TOTAL_GROUPS, (int)TOTAL_CANDIDATES) =
                     !isnan(result) && !isinf(result) ? result : 0;
                 // ---...--- //
             } // --- End candidate loop
@@ -642,11 +588,11 @@ double *computeQHitAndRun(Matrix const *probabilities, QMethodInput params, doub
             v = exp(multiplicationValues[i]);
             sum_exp_num += v;
         }
-        for (int i = 0; i < currentSet->size; i++)
+        for (int i = 0; i < currentSet->size && params.computeLL; i++)
         { // --- For each sample
             double val = exp(multiplicationValues[i]) / sum_exp_num;
             *ll -= val * log(currentSet->counts[i] * val);
-            *ll += Qconstant[b][i] * val; // New term
+            *ll += ctx->Qconstant[b][i] * val; // New term
         }
         // ---...--- //
 
@@ -656,62 +602,5 @@ double *computeQHitAndRun(Matrix const *probabilities, QMethodInput params, doub
         // ---...--- //
     } // --- End ballot box loop
 
-    // Calculo Q
-    double toprint = computeQ(array2, probabilities);
-
-    // *ll += computeQ(array2, probabilities);
-    *ll += toprint;
-
-    return array2;
-}
-
-void cleanHitAndRun(void)
-{
-    if (OMEGASET != NULL)
-    {
-        for (uint32_t b = 0; b < TOTAL_BALLOTS; b++)
-        {
-            if (OMEGASET[b] != NULL) // Ensure it's valid before freeing
-            {
-                for (size_t s = 0; s < OMEGASET[b]->size; s++)
-                {
-                    if (OMEGASET[b]->data[s] != NULL)
-                    {
-                        freeMatrix(OMEGASET[b]->data[s]); // Free individual matrices
-                        OMEGASET[b]->data[s] = NULL;      // Avoid dangling pointers
-                    }
-                }
-
-                Free(OMEGASET[b]->data); // Free the data array
-                OMEGASET[b]->data = NULL;
-
-                Free(OMEGASET[b]); // Free the OmegaSet struct
-                OMEGASET[b] = NULL;
-            }
-
-            if (OMEGASET[b]->counts != NULL)
-            {
-                Free(OMEGASET[b]->counts);
-                OMEGASET[b]->counts = NULL;
-            }
-        }
-
-        Free(OMEGASET); // Free the OMEGASET array
-        OMEGASET = NULL;
-    }
-    if (multinomialVals != NULL)
-    {
-        Free(multinomialVals);
-        multinomialVals = NULL;
-    }
-    if (logGammaArr != NULL)
-    {
-        Free(logGammaArr);
-        logGammaArr = NULL;
-    }
-    if (Qconstant != NULL)
-    {
-        Free(Qconstant);
-        Qconstant = NULL;
-    }
+    *ll += params.computeLL ? computeQ(ctx) : 0;
 }

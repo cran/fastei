@@ -14,17 +14,21 @@ run_em(
   initial_prob = "group_proportional",
   allow_mismatch = TRUE,
   maxiter = 1000,
+  miniter = 0,
   maxtime = 3600,
   param_threshold = 0.001,
   ll_threshold = as.double(-Inf),
+  compute_ll = TRUE,
   seed = NULL,
   verbose = FALSE,
   group_agg = NULL,
   mcmc_samples = 1000,
   mcmc_stepsize = 3000,
   mvncdf_method = "genz",
-  mvncdf_error = 0.00001,
+  mvncdf_error = 1e-05,
   mvncdf_samples = 5000,
+  adjust_prob_cond_method = "project_lp",
+  adjust_prob_cond_every = FALSE,
   ...
 )
 }
@@ -63,6 +67,8 @@ probability. Accepted values are:
 \item{maxiter}{An optional integer indicating the maximum number of EM iterations.
 The default value is \code{1000}.}
 
+\item{miniter}{An optional integer indicating the minimum number of EM iterations. The default value is \code{0}.}
+
 \item{maxtime}{An optional numeric specifying the maximum running time (in seconds) for the
 algorithm. This is checked at every iteration of the EM algorithm. The default value is \code{3600}, which corresponds to an hour.}
 
@@ -71,6 +77,8 @@ consecutive probability values required to stop iterating. The default value is 
 
 \item{ll_threshold}{An optional numeric value indicating the minimum difference between consecutive log-likelihood values to stop iterating. The default value is \code{inf}, essentially deactivating
 the threshold. Note that the algorithm will stop if either \code{ll_threshold} \strong{or} \code{param_threshold} is accomplished.}
+
+\item{compute_ll}{An optional boolean indicating whether to compute the log-likelihood at each iteration. The default value is \code{TRUE}.}
 
 \item{seed}{An optional integer indicating the random seed for the randomized algorithms. This argument is only applicable if \code{initial_prob = "random"} or \code{method} is either \code{"mcmc"} or \code{"mvn_cdf"}.}
 
@@ -98,13 +106,18 @@ when \code{method = "mvn_cdf"}.}
 \item{mvncdf_samples}{An optional integer specifying the number of Monte Carlo
 samples for the \code{mvn_cdf} method. The default value is \code{5000}. This argument is only applicable when \code{method = "mvn_cdf"}.}
 
+\item{adjust_prob_cond_method}{An optional string indicating the method to adjust the conditional probability so that for each candidate, the sum product of voters and conditional probabilities across groups equals the votes obtained by the candidate. It can take values: \code{""} if no adjusting is made, \code{lp} if the adjustment is based on a linear programming that penalizes with zero norm, \code{project_lp} if the adjustment is performed using projection and linear programming (this is the default)}
+
+\item{adjust_prob_cond_every}{An optional boolean indicating whether to adjust the conditional probability on every iteration (if \code{TRUE}), or only at the conditional probabilities obtained at the end of the EM algorithm (if \code{FALSE}, this is the default). This parameter applies only if \code{adjust_prob_conditional_method} is \code{lp} or \code{project_lp}.}
+
 \item{...}{Added for compability}
 }
 \value{
 The function returns an \code{eim} object with the function arguments and the following attributes:
 \describe{
 \item{prob}{The estimated probability matrix \verb{(g x c)}.}
-\item{cond_prob}{A \verb{(b x g x c)} 3d-array with the probability that a at each ballot-box a voter of each group voted for each candidate, given the observed outcome at the particular ballot-box.}
+\item{cond_prob}{A \verb{(g x c x b)} 3d-array with the probability that a at each ballot-box a voter of each group voted for each candidate, given the observed outcome at the particular ballot-box.}
+\item{expected_outcome}{A \verb{(g x c x b)} 3d-array with the expected votes cast for each ballot box.}
 \item{logLik}{The log-likelihood value from the last iteration.}
 \item{iterations}{The total number of iterations performed by the EM algorithm.}
 \item{time}{The total execution time of the algorithm in seconds.}
@@ -121,7 +134,7 @@ The final status ID of the algorithm upon completion:
 }
 Aditionally, it will create \code{mcmc_samples} and \code{mcmc_stepsize} parameters if the specified \code{method = "mcmc"}, or \code{mvncdf_method}, \code{mvncdf_error} and \code{mvncdf_samples} if \code{method = "mvn_cdf"}.
 
-Also, if the eim object supplied is created with the function \link{simulate_election}, it also returns the real probability with the name \code{real_prob}. See \link{simulate_election}.
+Also, if the eim object supplied is created with the function \link{simulate_election}, it also returns the real probability and unobserved votes with the name \code{real_prob} and \code{outcome} respectively. See \link{simulate_election}.
 
 If \code{group_agg} is different than \code{NULL}, two values are returned: \code{W_agg} a \verb{(b x a)} matrix with the number of voters of each aggregated group o each ballot-box, and \code{group_agg} the same input vector.
 }

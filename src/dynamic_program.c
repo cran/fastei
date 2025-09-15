@@ -41,6 +41,9 @@ SOFTWARE.
 #define Free(p) R_chk_free((void *)(p))
 #endif
 
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
+
 double getSigmaForRange(const Matrix *xmat, const Matrix *wmat, int g1, int g2, double *ballotVotes)
 {
     int ballotBoxes = wmat->rows;
@@ -342,7 +345,7 @@ int *solveDP(int G, int A, const Matrix *lastReward,
  * Obtain the bootstrapping values of the group aggregations and the convergence value
  *
  */
-Matrix testBootstrap(double *quality, const char *set_method, const Matrix *xmat, const Matrix *wmat,
+Matrix testBootstrap(EMContext *ctx, double *quality, const char *set_method, Matrix *xmat, const Matrix *wmat,
                      const int *boundaries, int A, int bootiter, const char *q_method, const char *p_method,
                      const double convergence, const double log_convergence, const int maxIter, const double maxSeconds,
                      QMethodInput inputParams)
@@ -366,7 +369,7 @@ Matrix testBootstrap(double *quality, const char *set_method, const Matrix *xmat
         mergedMat = createMatrix(wmat->rows, 1);
         for (int i = 0; i < (int)TOTAL_BALLOTS; i++)
         {
-            MATRIX_AT(mergedMat, i, 0) = BALLOTS_VOTES[i];
+            MATRIX_AT(mergedMat, i, 0) = ctx->ballots_votes[i];
         }
         // printMatrix(&mergedMat);
         GetRNGstate();
@@ -426,7 +429,7 @@ Matrix testBootstrap(double *quality, const char *set_method, const Matrix *xmat
  */
 Matrix aggregateGroups(
     // ---- Matrices
-    const Matrix *xmat, const Matrix *wmat,
+    EMContext *ctx,
 
     // ---- Results
     int *results, // Array with cutting indices
@@ -438,6 +441,8 @@ Matrix aggregateGroups(
     const char *q_method, const double convergence, const double log_convergence, const int maxIter, double maxSeconds,
     const bool verbose, QMethodInput *inputParams)
 {
+    Matrix *wmat = &ctx->W;
+    Matrix *xmat = &ctx->X;
 
     // ---- Define initial parameters ---- //
     double bestValue = DBL_MAX;
@@ -473,14 +478,14 @@ Matrix aggregateGroups(
                 Rprintf("Groups standard deviation:\t%f\n", bestVal);
             }
             // ---- Calculate the bootstrap matrix according the cutting boundaries
-            bootstrapMatrix = testBootstrap(&quality, set_method, xmat, wmat, boundaries, i, bootiter, q_method,
+            bootstrapMatrix = testBootstrap(ctx, &quality, set_method, xmat, wmat, boundaries, i, bootiter, q_method,
                                             p_method, convergence, log_convergence, maxIter, maxSeconds, *inputParams);
         }
         // ---- Case where there's no cuts ---- //
         else
         {
             // int *boundaries = Calloc(2, int);
-            bootstrapMatrix = testBootstrap(&quality, set_method, xmat, wmat, boundaries, -1, bootiter, q_method,
+            bootstrapMatrix = testBootstrap(ctx, &quality, set_method, xmat, wmat, boundaries, -1, bootiter, q_method,
                                             p_method, convergence, log_convergence, maxIter, maxSeconds, *inputParams);
         }
         if (verbose && quality)
@@ -502,7 +507,9 @@ Matrix aggregateGroups(
             results[0] = i == 1 ? wmat->cols - 1 : results[0];
 
             if ((i != 1) & (boundaries != NULL))
+            {
                 Free(boundaries);
+            }
             return bootstrapMatrix;
         }
         // --- Case it is a better candidate than before
@@ -521,7 +528,8 @@ Matrix aggregateGroups(
         }
         else
         {
-            Free(boundaries);
+            if (i != 1)
+                Free(boundaries);
             freeMatrix(&bootstrapMatrix);
         }
     }
@@ -538,7 +546,7 @@ Matrix aggregateGroups(
             if (k != totalMacrogroups - 1)
                 Rprintf(", ");
         }
-        Rprintf("] with a value of %.4f — still above the threshold of %.4f.", bestValue, set_threshold);
+        Rprintf("] with a value of %.4f — still above the threshold of %.4f. ", bestValue, set_threshold);
         if (!feasible)
         {
             Rprintf("If "
@@ -575,6 +583,7 @@ typedef struct
     int bestFinishReason;
     int bestIterTotal;
     int *bestBoundaries;
+    double *bestExpected;
     int bestGroupCount;
 } ExhaustiveResult;
 
@@ -622,25 +631,31 @@ static void enumerateAllPartitions(int start, int G, int *currentBoundaries, int
         Matrix merged = mergeColumns(opts->wmat, currentBoundaries, currentSize);
 
         // ---- Run the EM Algorithm
-        setParameters(opts->xmat, &merged);
+        // setParameters(opts->xmat, &merged);
 
-        Matrix initP = getInitialP(opts->p_method);
+        // Matrix initP = getInitialP(opts->p_method);
 
         double timeUsed = 0.0;
         double logLLs = 0.0; // TODO: Change this when the array stops being required
         double *qvals = NULL;
         int finishingReason = 0, totalIter = 0;
 
-        Matrix finalP = EMAlgoritm(&initP, opts->q_method, opts->convergence, opts->log_convergence, opts->maxIter,
-                                   opts->maxSeconds, false, &timeUsed, &totalIter, &logLLs, &qvals, &finishingReason,
-                                   &opts->inputParams);
+        EMContext *ctx = EMAlgoritm(opts->xmat, &merged, opts->p_method, opts->q_method, opts->convergence,
+                                    opts->log_convergence, opts->maxIter, opts->maxSeconds, false, &timeUsed,
+                                    &totalIter, &logLLs, &finishingReason, &opts->inputParams);
+
+        size_t n_q = (size_t)ctx->B * ctx->G * ctx->C;
+        qvals = (double *)Calloc(n_q, double);
+        memcpy(qvals, ctx->q, n_q * sizeof(double));
+        // qvals = &ctx->q;
 
         double currentLL = (totalIter > 0) ? logLLs : -DBL_MAX;
         if (opts->verbose)
             Rprintf("Log-likelihood:\t%f\n", currentLL);
 
         // ---- Clean every allocated memory ---- //
-        cleanup();
+        // cleanup(ctx);
+        /*
         if (strcmp(opts->q_method, "exact") == 0)
         {
             cleanExact();
@@ -649,13 +664,13 @@ static void enumerateAllPartitions(int start, int G, int *currentBoundaries, int
         {
             cleanHitAndRun();
         }
+        */
         // else if (strcmp(opts->q_method, "mult") == 0)
         //{
         //    cleanMultinomial();
         //}
-        freeMatrix(&initP);
         // free the merged aggregator:
-        freeMatrix(&merged);
+        // freeMatrix(&merged);
 
         // ---- Save the results if the value is better
 
@@ -664,7 +679,7 @@ static void enumerateAllPartitions(int start, int G, int *currentBoundaries, int
             // --- Now it would be convenient to evaluate within the SD, later, goto notBestValue
             double qual;
             Matrix bootstrapedMat =
-                testBootstrap(&qual, opts->set_method, opts->xmat, opts->wmat, currentBoundaries, currentSize,
+                testBootstrap(ctx, &qual, opts->set_method, opts->xmat, opts->wmat, currentBoundaries, currentSize,
                               opts->bootiter, opts->q_method, opts->p_method, opts->convergence, opts->log_convergence,
                               opts->maxIter, opts->maxSeconds, opts->inputParams);
             // freeMatrix(&bootstrapedMat);
@@ -680,6 +695,8 @@ static void enumerateAllPartitions(int start, int G, int *currentBoundaries, int
                     freeMatrix(res->bestMat), Free(res->bestMat);
                 if (res->bestq)
                     Free(res->bestq);
+                if (res->bestExpected)
+                    Free(res->bestExpected);
                 if (res->bestBoundaries)
                     Free(res->bestBoundaries);
 
@@ -690,11 +707,13 @@ static void enumerateAllPartitions(int start, int G, int *currentBoundaries, int
                 res->bestIterTotal = totalIter;
 
                 res->bestq = qvals;
-                qvals = NULL; // prevent double‐free
+                res->bestExpected = ctx->predicted_votes;
+                ctx->predicted_votes = NULL; // prevent double‐free
+                qvals = NULL;                // prevent double‐free
 
                 // deep‐copy matrices
                 res->bestMat = (Matrix *)Calloc(1, Matrix);
-                *res->bestMat = finalP;
+                *res->bestMat = copMatrix(&ctx->probabilities);
                 res->bestBootstrap = (Matrix *)Calloc(1, Matrix);
                 *res->bestBootstrap = copMatrix(&bootstrapedMat);
                 freeMatrix(&bootstrapedMat);
@@ -706,13 +725,15 @@ static void enumerateAllPartitions(int start, int G, int *currentBoundaries, int
                     res->bestBoundaries[i] = currentBoundaries[i];
             }
         }
-        else
-        {
-            // cleanup non‐best branch
-            freeMatrix(&finalP);
-            if (qvals)
-                Free(qvals);
-        }
+        // else
+        //  {
+        //  cleanup non‐best branch
+        //  freeMatrix(&finalP);
+        cleanup(ctx);
+        freeMatrix(&merged);
+        // if (qvals)
+        //    Free(qvals);
+        //}
         return;
     }
 
@@ -729,7 +750,8 @@ Matrix aggregateGroupsExhaustive(Matrix *xmat, Matrix *wmat, int *results, int *
                                  int bootiter, double max_qual, const char *p_method, const char *q_method,
                                  double convergence, double log_convergence, bool verbose, int maxIter,
                                  double maxSeconds, QMethodInput *inputParams, double *outBestLL, double **outBestQ,
-                                 Matrix **bestBootstrap, double *outBestTime, int *outFinishReason, int *outIterTotal)
+                                 double **bestExpected, Matrix **bestBootstrap, double *outBestTime,
+                                 int *outFinishReason, int *outIterTotal)
 {
     int G = wmat->cols;
 
@@ -796,6 +818,8 @@ Matrix aggregateGroupsExhaustive(Matrix *xmat, Matrix *wmat, int *results, int *
         *outIterTotal = res.bestIterTotal;
     if (bestBootstrap)
         *bestBootstrap = res.bestBootstrap;
+    if (bestExpected)
+        *bestExpected = res.bestExpected, res.bestExpected = NULL;
 
     // copy & clean up
     Matrix bestCopy = copMatrix(res.bestMat);

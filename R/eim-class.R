@@ -143,7 +143,10 @@ eim <- function(X = NULL, W = NULL, json_path = NULL) {
             "mcmc_stepsize",
             "mvncdf_method",
             "mvncdf_samples",
-            "mvncdf_error"
+            "mvncdf_error",
+            "miniter",
+            "adjust_prob_cond_method",
+            "adjust_prob_cond_every"
         )
         extra_params <- matrices[names(matrices) %in% allowed_params] # TODO: Validate them
     }
@@ -197,6 +200,8 @@ eim <- function(X = NULL, W = NULL, json_path = NULL) {
 #' @param maxiter An optional integer indicating the maximum number of EM iterations.
 #'   The default value is `1000`.
 #'
+#' @param miniter An optional integer indicating the minimum number of EM iterations. The default value is `0`.
+#'
 #' @param maxtime An optional numeric specifying the maximum running time (in seconds) for the
 #'   algorithm. This is checked at every iteration of the EM algorithm. The default value is `3600`, which corresponds to an hour.
 #'
@@ -205,6 +210,12 @@ eim <- function(X = NULL, W = NULL, json_path = NULL) {
 #'
 #' @param ll_threshold An optional numeric value indicating the minimum difference between consecutive log-likelihood values to stop iterating. The default value is `inf`, essentially deactivating
 #' the threshold. Note that the algorithm will stop if either `ll_threshold` **or** `param_threshold` is accomplished.
+#'
+#' @param compute_ll An optional boolean indicating whether to compute the log-likelihood at each iteration. The default value is `TRUE`.
+#'
+#' @param adjust_prob_cond_method An optional string indicating the method to adjust the conditional probability so that for each candidate, the sum product of voters and conditional probabilities across groups equals the votes obtained by the candidate. It can take values: `""` if no adjusting is made, `lp` if the adjustment is based on a linear programming that penalizes with zero norm, `project_lp` if the adjustment is performed using projection and linear programming (this is the default)
+#'
+#' @param adjust_prob_cond_every An optional boolean indicating whether to adjust the conditional probability on every iteration (if `TRUE`), or only at the conditional probabilities obtained at the end of the EM algorithm (if `FALSE`, this is the default). This parameter applies only if `adjust_prob_conditional_method` is `lp` or `project_lp`.
 #'
 #' @param verbose An optional boolean indicating whether to print informational messages during the EM
 #'   iterations. The default value is `FALSE`.
@@ -257,7 +268,8 @@ eim <- function(X = NULL, W = NULL, json_path = NULL) {
 #' The function returns an `eim` object with the function arguments and the following attributes:
 #' \describe{
 #'   \item{prob}{The estimated probability matrix `(g x c)`.}
-#' 	 \item{cond_prob}{A `(b x g x c)` 3d-array with the probability that a at each ballot-box a voter of each group voted for each candidate, given the observed outcome at the particular ballot-box.}
+#' 	 \item{cond_prob}{A `(g x c x b)` 3d-array with the probability that a at each ballot-box a voter of each group voted for each candidate, given the observed outcome at the particular ballot-box.}
+#' 	 \item{expected_outcome}{A `(g x c x b)` 3d-array with the expected votes cast for each ballot box.}
 #'   \item{logLik}{The log-likelihood value from the last iteration.}
 #'   \item{iterations}{The total number of iterations performed by the EM algorithm.}
 #'   \item{time}{The total execution time of the algorithm in seconds.}
@@ -274,7 +286,7 @@ eim <- function(X = NULL, W = NULL, json_path = NULL) {
 #' }
 #' Aditionally, it will create `mcmc_samples` and `mcmc_stepsize` parameters if the specified `method = "mcmc"`, or `mvncdf_method`, `mvncdf_error` and `mvncdf_samples` if `method = "mvn_cdf"`.
 #'
-#' Also, if the eim object supplied is created with the function [simulate_election], it also returns the real probability with the name `real_prob`. See [simulate_election].
+#' Also, if the eim object supplied is created with the function [simulate_election], it also returns the real probability and unobserved votes with the name `real_prob` and `outcome` respectively. See [simulate_election].
 #'
 #' If `group_agg` is different than `NULL`, two values are returned: `W_agg` a `(b x a)` matrix with the number of voters of each aggregated group o each ballot-box, and `group_agg` the same input vector.
 #'
@@ -324,9 +336,11 @@ run_em <- function(object = NULL,
                    initial_prob = "group_proportional",
                    allow_mismatch = TRUE,
                    maxiter = 1000,
+                   miniter = 0,
                    maxtime = 3600,
                    param_threshold = 0.001,
                    ll_threshold = as.double(-Inf),
+                   compute_ll = TRUE,
                    seed = NULL,
                    verbose = FALSE,
                    group_agg = NULL,
@@ -335,6 +349,8 @@ run_em <- function(object = NULL,
                    mvncdf_method = "genz",
                    mvncdf_error = 1e-5,
                    mvncdf_samples = 5000,
+                   adjust_prob_cond_method = "project_lp",
+                   adjust_prob_cond_every = FALSE,
                    ...) {
     all_params <- lapply(as.list(match.call(expand.dots = TRUE)), eval, parent.frame())
     .validate_compute(all_params) # nolint
@@ -383,6 +399,8 @@ run_em <- function(object = NULL,
         object$mcmc_stepsize <- as.integer(if ("mcmc_stepsize" %in% names(all_params)) all_params$mcmc_stepsize else 3000)
         # Samples
         object$mcmc_samples <- as.integer(if ("mcmc_samples" %in% names(all_params)) all_params$mcmc_samples else 1000)
+        # Burn in
+        object$burn_in <- as.integer(if ("burn_in" %in% names(all_params)) all_params$burn_in else 10000)
     } else if (method == "mvn_cdf") {
         # Montecarlo method
         object$mvncdf_method <- if ("mvncdf_method" %in% names(all_params)) all_params$mvncdf_method else "genz"
@@ -393,21 +411,27 @@ run_em <- function(object = NULL,
     }
 
     W <- if (is.null(object$W_agg)) object$W else object$W_agg
-    RsetParameters(t(object$X), W)
+    # RsetParameters(t(object$X), W)
 
     resulting_values <- EMAlgorithmFull(
+        t(object$X),
+        W,
         method,
         initial_prob,
         maxiter,
         maxtime,
         param_threshold,
         ll_threshold,
+        compute_ll,
         verbose,
-        as.integer(if (!is.null(object$mcmc_stepsize)) object$mcmc_stepsize else 1000),
-        as.integer(if (!is.null(object$mcmc_samples)) object$mcmc_samples else 3000),
+        as.integer(if (!is.null(object$mcmc_stepsize)) object$mcmc_stepsize else 3000),
+        as.integer(if (!is.null(object$mcmc_samples)) object$mcmc_samples else 1000),
         if (!is.null(object$mvncdf_method)) object$mvncdf_method else "genz",
+        as.numeric(if (!is.null(object$mvncdf_error)) object$mvncdf_error else 1e-6),
         as.numeric(if (!is.null(object$mvncdf_samples)) object$mvncdf_samples else 5000),
-        as.numeric(if (!is.null(object$mvncdf_error)) object$mvncdf_error else 1e-6)
+        miniter,
+        adjust_prob_cond_method,
+        adjust_prob_cond_every
     )
     # ---------- ... ---------- #
 
@@ -418,19 +442,30 @@ run_em <- function(object = NULL,
         colnames(object$X),
         rownames(object$X)
     )
+    object$expected_outcome <- resulting_values$expected_outcome
+    dimnames(object$expected_outcome) <- list(
+        colnames(W),
+        colnames(object$X),
+        rownames(object$X)
+    )
     object$prob <- as.matrix(resulting_values$result)
     dimnames(object$prob) <- list(colnames(W), colnames(object$X))
     object$iterations <- as.numeric(resulting_values$total_iterations)
-    object$logLik <- as.numeric(resulting_values$log_likelihood[length(resulting_values$log_likelihood)])
+    if (compute_ll) {
+        object$logLik <- as.numeric(resulting_values$log_likelihood[length(resulting_values$log_likelihood)])
+    }
     object$time <- resulting_values$total_time
     object$message <- resulting_values$stopping_reason
     object$status <- as.integer(resulting_values$finish_id)
     # Add function arguments
+    object$miniter <- miniter
     object$maxiter <- maxiter
-    object$maxiter <- maxtime
+    object$maxtime <- maxtime
     object$param_threshold <- param_threshold
     object$ll_threshold <- ll_threshold
     object$initial_prob <- initial_prob
+    object$adjust_prob_cond_method <- adjust_prob_cond_method
+    object$adjust_prob_cond_every <- adjust_prob_cond_every
 
     invisible(object) # Updates the object.
 }
@@ -568,9 +603,13 @@ bootstrap <- function(object = NULL,
     W <- if (is.null(object$W_agg)) object$W else object$W_agg
     initial_prob <- if (!is.null(all_params$initial_prob)) all_params$initial_prob else "group_proportional"
     maxiter <- if (!is.null(all_params$maxiter)) all_params$maxiter else 1000
+    miniter <- if (!is.null(all_params$miniter)) all_params$miniter else 0
     maxtime <- if (!is.null(all_params$maxtime)) all_params$maxtime else 3600
     param_threshold <- if (!is.null(all_params$param_threshold)) all_params$param_threshold else 0.001
     verbose <- if (!is.null(all_params$verbose)) all_params$verbose else FALSE
+    compute_ll <- if (!is.null(all_params$compute_ll)) all_params$compute_ll else TRUE
+    adjust_prob_cond_method <- if (!is.null(all_params$adjust_prob_cond_method)) all_params$adjust_prob_cond_method else ""
+    adjust_prob_cond_every <- if (!is.null(all_params$adjust_prob_cond_every)) all_params$adjust_prob_cond_every else FALSE
 
     # R does a subtle type conversion when handing -Inf. Hence, we'll use a direct assignment
     if ("ll_threshold" %in% names(all_params)) {
@@ -589,18 +628,13 @@ bootstrap <- function(object = NULL,
     if (method == "mcmc") {
         mcmc_stepsize <- if (!is.null(all_params$mcmc_stepsize)) all_params$mcmc_stepsize else 3000
         mcmc_samples <- if (!is.null(all_params$mcmc_samples)) all_params$mcmc_samples else 1000
-        mvncdf_method <- ""
-        mvncdf_samples <- 0L
-        mvncdf_error <- 0.0
+        burn_in <- if (!is.null(all_params$burn_in)) all_params$burn_in else 10000
     } else if (method == "mvn_cdf") {
         mvncdf_method <- if (!is.null(all_params$mvncdf_method)) all_params$method else "genz"
         mvncdf_samples <- if (!is.null(all_params$mvncdf_samples)) all_params$mvncdf_samples else 5000
         mvncdf_error <- if (!is.null(all_params$mvncdf_error)) all_params$mvncdf_error else 1e-6
-        mcmc_stepsize <- 0L
-        mcmc_samples <- 0L
-    }
+    } # Call C bootstrap function
 
-    # Call C bootstrap function
     result <- bootstrapAlg(
         t(object$X),
         W,
@@ -611,12 +645,16 @@ bootstrap <- function(object = NULL,
         as.double(maxtime),
         as.double(param_threshold),
         as.double(ll_threshold),
+        as.logical(compute_ll),
         as.logical(verbose),
         as.integer(mcmc_stepsize),
         as.integer(mcmc_samples),
         as.character(mvncdf_method),
         as.double(mvncdf_error),
-        as.integer(mvncdf_samples)
+        as.integer(mvncdf_samples),
+        as.integer(miniter),
+        as.character(adjust_prob_cond_method),
+        as.logical(adjust_prob_cond_every)
     )
 
     object$sd <- result
@@ -773,9 +811,14 @@ get_agg_proxy <- function(object = NULL,
     # Extract parameters with defaults if missing
     initial_prob <- if (!is.null(all_params$initial_prob)) all_params$initial_prob else "group_proportional"
     maxiter <- if (!is.null(all_params$maxiter)) all_params$maxiter else 1000
+    miniter <- if (!is.null(all_params$miniter)) all_params$miniter else 0
     maxtime <- if (!is.null(all_params$maxtime)) all_params$maxtime else 3600
     param_threshold <- if (!is.null(all_params$param_threshold)) all_params$param_threshold else 0.01
     verbose <- if (!is.null(all_params$verbose)) all_params$verbose else FALSE
+    compute_ll <- if (!is.null(all_params$compute_ll)) all_params$compute_ll else TRUE
+    adjust_prob_cond_method <- if (!is.null(all_params$adjust_prob_cond_method)) all_params$adjust_prob_cond_method else ""
+    adjust_prob_cond_every <- if (!is.null(all_params$adjust_prob_cond_every)) all_params$adjust_prob_cond_every else FALSE
+
 
     # R does a subtle type conversion when handing -Inf. Hence, we'll use a direct assignment
     if ("ll_threshold" %in% names(all_params)) {
@@ -794,15 +837,11 @@ get_agg_proxy <- function(object = NULL,
     if (method == "mcmc") {
         mcmc_stepsize <- if (!is.null(all_params$mcmc_stepsize)) all_params$mcmc_stepsize else 3000
         mcmc_samples <- if (!is.null(all_params$mcmc_samples)) all_params$mcmc_samples else 1000
-        mvncdf_method <- ""
-        mvncdf_samples <- 0L
-        mvncdf_error <- 0.0
+        burn_in <- if (!is.null(all_params$burn_in)) all_params$burn_in else 10000
     } else if (method == "mvn_cdf") {
         mvncdf_method <- if (!is.null(all_params$mvncdf_method)) all_params$method else "genz"
         mvncdf_samples <- if (!is.null(all_params$mvncdf_samples)) all_params$mvncdf_samples else 5000
         mvncdf_error <- if (!is.null(all_params$mvncdf_error)) all_params$mvncdf_error else 1e-6
-        mcmc_stepsize <- 0L
-        mcmc_samples <- 0L
     }
 
     result <- groupAgg(
@@ -818,12 +857,16 @@ get_agg_proxy <- function(object = NULL,
         as.double(maxtime),
         as.double(param_threshold),
         as.double(ll_threshold),
+        as.logical(compute_ll),
         as.logical(verbose),
         as.integer(mcmc_stepsize),
         as.integer(mcmc_samples),
         as.character(mvncdf_method),
         as.double(mvncdf_error),
-        as.integer(mvncdf_samples)
+        as.integer(mvncdf_samples),
+        as.integer(miniter),
+        as.character(adjust_prob_cond_method),
+        as.logical(adjust_prob_cond_every)
     )
 
     # If the returned matrix isn't the best non-feasible result
@@ -967,9 +1010,13 @@ get_agg_opt <- function(object = NULL,
 
     initial_prob <- if (!is.null(all_params$initial_prob)) all_params$initial_prob else "group_proportional"
     maxiter <- if (!is.null(all_params$maxiter)) all_params$maxiter else 1000
+    miniter <- if (!is.null(all_params$miniter)) all_params$miniter else 0
     maxtime <- if (!is.null(all_params$maxtime)) all_params$maxtime else 3600
     param_threshold <- if (!is.null(all_params$param_threshold)) all_params$param_threshold else 0.01
     verbose <- if (!is.null(all_params$verbose)) all_params$verbose else FALSE
+    compute_ll <- if (!is.null(all_params$compute_ll)) all_params$compute_ll else TRUE
+    adjust_prob_cond_method <- if (!is.null(all_params$adjust_prob_cond_method)) all_params$adjust_prob_cond_method else ""
+    adjust_prob_cond_every <- if (!is.null(all_params$adjust_prob_cond_every)) all_params$adjust_prob_cond_every else FALSE
 
     # R does a subtle type conversion when handing -Inf. Hence, we'll use a direct assignment
     if ("ll_threshold" %in% names(all_params)) {
@@ -988,15 +1035,11 @@ get_agg_opt <- function(object = NULL,
     if (method == "mcmc") {
         mcmc_stepsize <- if (!is.null(all_params$mcmc_stepsize)) all_params$mcmc_stepsize else 3000
         mcmc_samples <- if (!is.null(all_params$mcmc_samples)) all_params$mcmc_samples else 1000
-        mvncdf_method <- ""
-        mvncdf_samples <- 0L
-        mvncdf_error <- 0.0
+        burn_in <- if (!is.null(all_params$burn_in)) all_params$burn_in else 10000
     } else if (method == "mvn_cdf") {
         mvncdf_method <- if (!is.null(all_params$mvncdf_method)) all_params$mvncdf_method else "genz"
         mvncdf_samples <- if (!is.null(all_params$mvncdf_samples)) all_params$mvncdf_samples else 5000
         mvncdf_error <- if (!is.null(all_params$mvncdf_error)) all_params$mvncdf_error else 1e-6
-        mcmc_stepsize <- 0L
-        mcmc_samples <- 0L
     }
 
     result <- groupAggGreedy(
@@ -1011,12 +1054,16 @@ get_agg_opt <- function(object = NULL,
         as.double(maxtime),
         as.double(param_threshold),
         as.double(ll_threshold),
+        as.logical(compute_ll),
         as.logical(verbose),
         as.integer(mcmc_stepsize),
         as.integer(mcmc_samples),
         as.character(mvncdf_method),
         as.double(mvncdf_error),
-        as.integer(mvncdf_samples)
+        as.integer(mvncdf_samples),
+        as.integer(miniter),
+        as.character(adjust_prob_cond_method),
+        as.logical(adjust_prob_cond_every)
     )
 
     if (result$indices[[1]] == -1) {
@@ -1031,6 +1078,12 @@ get_agg_opt <- function(object = NULL,
     object$cond_prob <- result$q
     # object$cond_prob <- aperm(result$q, perm = c(2, 3, 1)) # Correct dimensions
     dimnames(object$cond_prob) <- list(
+        NULL,
+        colnames(object$X),
+        rownames(object$X)
+    )
+    object$expected_outcome <- result$expected_outcome
+    dimnames(object$expected_outcome) <- list(
         NULL,
         colnames(object$X),
         rownames(object$X)
@@ -1053,7 +1106,10 @@ get_agg_opt <- function(object = NULL,
     object$param_threshold <- param_threshold
     object$maxtime <- maxtime
     object$maxiter <- maxiter
+    object$miniter <- miniter
     object$initial_prob <- initial_prob
+    object$adjust_prob_cond_method <- adjust_prob_cond_method
+    object$adjust_prob_cond_every <- adjust_prob_cond_every
 
     if (method == "mvn_cdf") {
         object$mvncdf_error <- mvncdf_error
@@ -1288,7 +1344,9 @@ print.eim <- function(x, ...) {
         }
         cat("Total Iterations:", object$iterations, "\n")
         cat("Total Time (s):", object$time, "\n")
-        cat("Log-likelihood:", tail(object$logLik, 1), "\n")
+        if (!is.null(object$logLik)) {
+            cat("Log-likelihood:", tail(object$logLik, 1), "\n")
+        }
     }
 }
 

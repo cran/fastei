@@ -13,9 +13,10 @@
 extern "C"
 {
 #endif
+#include "MCMC.h"
 #include "bootstrap.h"
 #include "exact.h"
-#include "hitAndRun.h"
+// #include "importanceSampling.h"
 #include "main.h"
 #include "utils_matrix.h"
 #ifdef __cplusplus
@@ -62,32 +63,14 @@ extern "C"
  * iterations that were made ("total_iterations"), time taken ("total_time"), stopping reason ("stopping_reason"),
  * finish id ("finish_id") and q value ("q").
  */
-Rcpp::List EMAlgorithmFull(Rcpp::String em_method = "mult", Rcpp::String probability_method = "group_proportional",
-                           Rcpp::IntegerVector maximum_iterations = Rcpp::IntegerVector::create(1000),
-                           Rcpp::NumericVector maximum_seconds = Rcpp::NumericVector::create(3600),
-                           Rcpp::NumericVector stopping_threshold = Rcpp::NumericVector::create(0.001),
-                           Rcpp::NumericVector log_threshold = Rcpp::NumericVector::create(-1000),
-                           Rcpp::LogicalVector verbose = Rcpp::LogicalVector::create(false),
-                           Rcpp::IntegerVector step_size = Rcpp::IntegerVector::create(3000),
-                           Rcpp::IntegerVector samples = Rcpp::IntegerVector::create(1000),
-                           Rcpp::String monte_method = "genz2",
-                           Rcpp::NumericVector monte_error = Rcpp::NumericVector(1e-6),
-                           Rcpp::IntegerVector monte_iter = Rcpp::IntegerVector(5000));
-
-/**
- * @brief Sets the `X` and `W` parameters on C
- *
- * Given an R's matrix, it sets the global parameters of `X` and `W` and computes all of its
- * important values (total candidates, votes per ballot, etc)
- *
- * @param Rcpp::NumericMatrix candidate_matrix A (c x b) matrix object of R that contains the votes that each
- * candidate `c` got on a ballot `b`.
- * @param Rcpp::NumericMatrix group_matrix A (b x g) matrix object of R that contains the votes that each
- * demographic group `g` did on a ballot `b`.
- *
- */
-void RsetParameters(Rcpp::NumericMatrix candidate_matrix, Rcpp::NumericMatrix group_matrix);
-
+Rcpp::List EMAlgorithmFull(Rcpp::NumericMatrix candidate_matrix, Rcpp::NumericMatrix group_matrix,
+                           Rcpp::String em_method, Rcpp::String probability_method,
+                           Rcpp::IntegerVector maximum_iterations, Rcpp::NumericVector maximum_seconds,
+                           Rcpp::NumericVector stopping_threshold, Rcpp::NumericVector log_stopping_threshold,
+                           Rcpp::LogicalVector compute_ll, Rcpp::LogicalVector verbose, Rcpp::IntegerVector step_size,
+                           Rcpp::IntegerVector samples, Rcpp::String monte_method, Rcpp::NumericVector monte_error,
+                           Rcpp::IntegerVector monte_iter, Rcpp::IntegerVector miniterations, Rcpp::String LP_method,
+                           Rcpp::LogicalVector project_every);
 /**
  *  Returns an array of col-major matrices with bootstrapped matrices.
  *
@@ -123,25 +106,26 @@ void RsetParameters(Rcpp::NumericMatrix candidate_matrix, Rcpp::NumericMatrix gr
  *
  * @return An allocated array of size bootiter * TOTAL_BALLOTS that stores matrices.
  */
-
 Rcpp::NumericMatrix bootstrapAlg(Rcpp::NumericMatrix candidate_matrix, Rcpp::NumericMatrix group_matrix,
                                  Rcpp::IntegerVector nboot, Rcpp::String em_method, Rcpp::String probability_method,
                                  Rcpp::IntegerVector maximum_iterations, Rcpp::NumericVector maximum_seconds,
-                                 Rcpp::NumericVector stopping_threshold, Rcpp::NumericVector log_threshold,
-                                 Rcpp::LogicalVector verbose, Rcpp::IntegerVector step_size,
-                                 Rcpp::IntegerVector samples, Rcpp::String monte_method,
-                                 Rcpp::NumericVector monte_error, Rcpp::IntegerVector monte_iter);
+                                 Rcpp::NumericVector stopping_threshold, Rcpp::NumericVector log_stopping_threshold,
+                                 Rcpp::LogicalVector compute_ll, Rcpp::LogicalVector verbose,
+                                 Rcpp::IntegerVector step_size, Rcpp::IntegerVector samples, Rcpp::String monte_method,
+                                 Rcpp::NumericVector monte_error, Rcpp::IntegerVector monte_iter,
+                                 Rcpp::IntegerVector miniterations, Rcpp::String LP_method,
+                                 Rcpp::LogicalVector project_every);
 
 /*
  * Returns a list with an heuristic-optimal bootstrapped matrix with an ideal group aggregation.
  *
- * @param[in] sd_statistic String indicates the statistic for the standard deviation (gxc) matrix. It can take the value
+ * @param[in] sd_statistic String indicates the statistic for the standard deviation (gxc) matrix. It can take the
+ * value 'maximum', in which case computes the maximum over the standard deviation matrix, or 'average', in which
+ * case computes the average.
+ *
+ * @param[in] String indicates the statistic for the standard deviation (gxc) matrix. It can take the value
  * 'maximum', in which case computes the maximum over the standard deviation matrix, or 'average', in which case
  * computes the average.
- *
- * @param[in] String indicates the statistic for the standard deviation (gxc) matrix. It can take the value 'maximum',
- * in which case computes the maximum over the standard deviation matrix, or 'average', in which case computes the
- * average.
  *
  * @param[in] candidate_matrix The 'X' matrix of dimension (cxb).
  *
@@ -182,9 +166,10 @@ Rcpp::List groupAgg(Rcpp::String sd_statistic, Rcpp::NumericVector sd_threshold,
                     Rcpp::NumericMatrix candidate_matrix, Rcpp::NumericMatrix group_matrix, Rcpp::IntegerVector nboot,
                     Rcpp::String em_method, Rcpp::String probability_method, Rcpp::IntegerVector maximum_iterations,
                     Rcpp::NumericVector maximum_seconds, Rcpp::NumericVector stopping_threshold,
-                    Rcpp::NumericVector log_threshold, Rcpp::LogicalVector verbose, Rcpp::IntegerVector step_size,
-                    Rcpp::IntegerVector samples, Rcpp::String monte_method, Rcpp::NumericVector monte_error,
-                    Rcpp::IntegerVector monte_iter);
+                    Rcpp::NumericVector log_stopping_threshold, Rcpp::LogicalVector compute_ll,
+                    Rcpp::LogicalVector verbose, Rcpp::IntegerVector step_size, Rcpp::IntegerVector samples,
+                    Rcpp::String monte_method, Rcpp::NumericVector monte_error, Rcpp::IntegerVector monte_iter,
+                    Rcpp::IntegerVector miniterations, Rcpp::String LP_method, Rcpp::LogicalVector project_every);
 
 /*
  *
@@ -225,7 +210,9 @@ Rcpp::List groupAggGreedy(Rcpp::String sd_statistic, Rcpp::NumericVector sd_thre
                           Rcpp::IntegerVector nboot, Rcpp::String em_method, Rcpp::String probability_method,
                           Rcpp::IntegerVector maximum_iterations, Rcpp::NumericVector maximum_seconds,
                           Rcpp::NumericVector stopping_threshold, Rcpp::NumericVector log_stopping_threshold,
-                          Rcpp::LogicalVector verbose, Rcpp::IntegerVector step_size, Rcpp::IntegerVector samples,
-                          Rcpp::String monte_method, Rcpp::NumericVector monte_error, Rcpp::IntegerVector monte_iter);
+                          Rcpp::NumericVector compute_ll, Rcpp::LogicalVector verbose, Rcpp::IntegerVector step_size,
+                          Rcpp::IntegerVector samples, Rcpp::String monte_method, Rcpp::NumericVector monte_error,
+                          Rcpp::IntegerVector monte_iter, Rcpp::IntegerVector miniterations, Rcpp::String LP_method,
+                          Rcpp::LogicalVector project_every);
 
 #endif // WRAPPER_H
