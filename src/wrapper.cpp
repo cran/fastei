@@ -23,6 +23,7 @@ SOFTWARE.
 #include "wrapper.h"
 #include "bootstrap.h"
 #include "dynamic_program.h"
+#include "exact.h"
 #include "main.h"
 #include <R.h>
 #include <R_ext/Random.h>
@@ -94,7 +95,7 @@ Rcpp::List EMAlgorithmFull(Rcpp::NumericMatrix candidate_matrix, Rcpp::NumericMa
                            Rcpp::LogicalVector compute_ll, Rcpp::LogicalVector verbose, Rcpp::IntegerVector step_size,
                            Rcpp::IntegerVector samples, Rcpp::String monte_method, Rcpp::NumericVector monte_error,
                            Rcpp::IntegerVector monte_iter, Rcpp::IntegerVector miniterations, Rcpp::String LP_method,
-                           Rcpp::LogicalVector project_every)
+                           Rcpp::LogicalVector project_every, Rcpp::NumericMatrix initial_probabilities)
 {
     std::string probabilityM = probability_method;
     std::string EMAlg = em_method;
@@ -103,6 +104,7 @@ Rcpp::List EMAlgorithmFull(Rcpp::NumericMatrix candidate_matrix, Rcpp::NumericMa
     int totalIter = 0, finish = 0;
     Matrix X;
     Matrix W;
+    Matrix P = convertToMatrix(initial_probabilities);
     RsetParameters(candidate_matrix, group_matrix, &X, &W);
 
     QMethodInput inputParams =
@@ -111,7 +113,7 @@ Rcpp::List EMAlgorithmFull(Rcpp::NumericMatrix candidate_matrix, Rcpp::NumericMa
 
     EMContext *ctx = EMAlgoritm(&X, &W, probabilityM.c_str(), EMAlg.c_str(), stopping_threshold[0],
                                 log_stopping_threshold[0], maximum_iterations[0], maximum_seconds[0], verbose[0],
-                                &timeIter, &totalIter, &logLLarr, &finish, &inputParams);
+                                &timeIter, &totalIter, &logLLarr, &finish, &P, &inputParams);
 
     Matrix *Pnew = &ctx->probabilities;
     double *qvalue = ctx->q;
@@ -161,7 +163,7 @@ Rcpp::NumericMatrix bootstrapAlg(Rcpp::NumericMatrix candidate_matrix, Rcpp::Num
                                  Rcpp::IntegerVector step_size, Rcpp::IntegerVector samples, Rcpp::String monte_method,
                                  Rcpp::NumericVector monte_error, Rcpp::IntegerVector monte_iter,
                                  Rcpp::IntegerVector miniterations, Rcpp::String LP_method,
-                                 Rcpp::LogicalVector project_every)
+                                 Rcpp::LogicalVector project_every, Rcpp::NumericMatrix initial_probabilities)
 {
     if (candidate_matrix.nrow() == 0 || candidate_matrix.ncol() == 0)
         Rcpp::stop("Error: X matrix has zero dimensions!");
@@ -171,6 +173,7 @@ Rcpp::NumericMatrix bootstrapAlg(Rcpp::NumericMatrix candidate_matrix, Rcpp::Num
 
     Matrix XR = convertToMatrix(candidate_matrix);
     Matrix WR = convertToMatrix(group_matrix);
+    Matrix P = convertToMatrix(initial_probabilities);
 
     std::string probabilityM = probability_method;
     std::string EMAlg = em_method;
@@ -182,7 +185,7 @@ Rcpp::NumericMatrix bootstrapAlg(Rcpp::NumericMatrix candidate_matrix, Rcpp::Num
 
     Matrix sdResult =
         bootstrapA(&XR, &WR, nboot[0], EMAlg.c_str(), probabilityM.c_str(), stopping_threshold[0],
-                   log_stopping_threshold[0], maximum_iterations[0], maximum_seconds[0], verbose[0], &inputParams);
+                   log_stopping_threshold[0], maximum_iterations[0], maximum_seconds[0], verbose[0], &P, &inputParams);
     if (inputParams.simulationMethod != nullptr)
     {
         free((void *)inputParams.simulationMethod);
@@ -209,7 +212,8 @@ Rcpp::List groupAgg(Rcpp::String sd_statistic, Rcpp::NumericVector sd_threshold,
                     Rcpp::NumericVector log_stopping_threshold, Rcpp::LogicalVector compute_ll,
                     Rcpp::LogicalVector verbose, Rcpp::IntegerVector step_size, Rcpp::IntegerVector samples,
                     Rcpp::String monte_method, Rcpp::NumericVector monte_error, Rcpp::IntegerVector monte_iter,
-                    Rcpp::IntegerVector miniterations, Rcpp::String LP_method, Rcpp::LogicalVector project_every)
+                    Rcpp::IntegerVector miniterations, Rcpp::String LP_method, Rcpp::LogicalVector project_every,
+                    Rcpp::NumericMatrix initial_probabilities)
 {
     if (candidate_matrix.nrow() == 0 || candidate_matrix.ncol() == 0)
         Rcpp::stop("Error: X matrix has zero dimensions!");
@@ -219,6 +223,8 @@ Rcpp::List groupAgg(Rcpp::String sd_statistic, Rcpp::NumericVector sd_threshold,
 
     Matrix XR = convertToMatrix(candidate_matrix);
     Matrix WR = convertToMatrix(group_matrix);
+    // Matrix P = createMatrix(WR.cols, XR.rows); // Empty initial probabilities
+    Matrix P = convertToMatrix(initial_probabilities);
 
     std::string probabilityM = probability_method;
     std::string EMAlg = em_method;
@@ -239,7 +245,7 @@ Rcpp::List groupAgg(Rcpp::String sd_statistic, Rcpp::NumericVector sd_threshold,
     Matrix sdResult =
         aggregateGroups(ctx, cuttingBuffer, &usedCuts, &bestResult, sd_threshold[0], aggMet.c_str(), feasible[0],
                         nboot[0], probabilityM.c_str(), EMAlg.c_str(), stopping_threshold[0], log_stopping_threshold[0],
-                        maximum_iterations[0], maximum_seconds[0], verbose[0], &inputParams);
+                        maximum_iterations[0], maximum_seconds[0], verbose[0], &P, &inputParams);
     if (inputParams.simulationMethod != nullptr)
     {
         free((void *)inputParams.simulationMethod);
@@ -287,6 +293,7 @@ Rcpp::List groupAggGreedy(Rcpp::String sd_statistic, Rcpp::NumericVector sd_thre
 
     Matrix XR = convertToMatrix(candidate_matrix);
     Matrix WR = convertToMatrix(group_matrix);
+    Matrix P = createMatrix(WR.cols, XR.rows); // Empty initial probabilities
 
     std::string probabilityM = probability_method;
     std::string EMAlg = em_method;
@@ -315,7 +322,7 @@ Rcpp::List groupAggGreedy(Rcpp::String sd_statistic, Rcpp::NumericVector sd_thre
     Matrix greedyP =
         aggregateGroupsExhaustive(&XR, &WR, boundaries, &numCuts, set_method.c_str(), nboot[0], sd_threshold[0],
                                   probabilityM.c_str(), EMAlg.c_str(), stopping_threshold[0], log_stopping_threshold[0],
-                                  verbose[0], maximum_iterations[0], maximum_seconds[0], &inputParams, &bestLogLL,
+                                  verbose[0], maximum_iterations[0], maximum_seconds[0], &P, &inputParams, &bestLogLL,
                                   &bestQ, &bestExpected, &bestBootstrap, &bestTime, &finishReason, &totalIter);
 
     if (inputParams.simulationMethod != nullptr)
@@ -386,3 +393,30 @@ Rcpp::List groupAggGreedy(Rcpp::String sd_statistic, Rcpp::NumericVector sd_thre
                               Rcpp::_["q"] = condProb, Rcpp::_["expected_outcome"] = expectedOut,
                               Rcpp::_["indices"] = result, Rcpp::_["bootstrap_sol"] = bootstrapSol);
 }
+
+// ---- Computes the exact log-likelihood ---- //
+// Rcpp::NumericVector computeExactLL(Rcpp::NumericMatrix candidate_matrix, Rcpp::NumericMatrix group_matrix,
+//                                    Rcpp::NumericMatrix prob_matrix)
+// {
+//     if (candidate_matrix.nrow() == 0 || candidate_matrix.ncol() == 0)
+//         Rcpp::stop("Error: X matrix has zero dimensions!");
+//
+//     if (group_matrix.nrow() == 0 || group_matrix.ncol() == 0)
+//         Rcpp::stop("Error: W matrix has zero dimensions!");
+//
+//     Matrix XR = convertToMatrix(candidate_matrix);
+//     Matrix WR = convertToMatrix(group_matrix);
+//     Matrix PR = convertToMatrix(prob_matrix);
+//
+//     EMContext *ctx = createEMContext(&XR, &WR, "exact", (QMethodInput){0});
+//     ctx->probabilities = PR;
+//
+//     double ll = computeExactLoglikelihood(ctx);
+//
+//     cleanup(ctx);
+//
+//     Rcpp::NumericVector result(1);
+//     result[0] = ll;
+//
+//     return result;
+// }

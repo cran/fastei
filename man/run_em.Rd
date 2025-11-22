@@ -25,10 +25,12 @@ run_em(
   mcmc_samples = 1000,
   mcmc_stepsize = 3000,
   mvncdf_method = "genz",
-  mvncdf_error = 1e-05,
+  mvncdf_error = 0.001,
   mvncdf_samples = 5000,
   adjust_prob_cond_method = "project_lp",
   adjust_prob_cond_every = FALSE,
+  scale_factor = 1,
+  symmetric = FALSE,
   ...
 )
 }
@@ -62,7 +64,7 @@ probability. Accepted values are:
 \item \code{random}: Use randomized values to fill the probability matrix.
 }}
 
-\item{allow_mismatch}{Boolean, if \code{TRUE}, allows a mismatch between the voters and votes for each ballot-box, only works if \code{method} is \code{"mvn_cdf"}, \code{"mvn_pdf"}, \code{"mult"} and \code{"mcmc"}. If \code{FALSE}, throws an error if there is a mismatch. By default it is \code{TRUE}.}
+\item{allow_mismatch}{Boolean, if \code{TRUE}, allows a mismatch between the voters and votes for each ballot-box. If \code{FALSE}, throws an error if there is a mismatch. By default it is \code{TRUE}. See \strong{Notes} for more details.}
 
 \item{maxiter}{An optional integer indicating the maximum number of EM iterations.
 The default value is \code{1000}.}
@@ -106,9 +108,13 @@ when \code{method = "mvn_cdf"}.}
 \item{mvncdf_samples}{An optional integer specifying the number of Monte Carlo
 samples for the \code{mvn_cdf} method. The default value is \code{5000}. This argument is only applicable when \code{method = "mvn_cdf"}.}
 
-\item{adjust_prob_cond_method}{An optional string indicating the method to adjust the conditional probability so that for each candidate, the sum product of voters and conditional probabilities across groups equals the votes obtained by the candidate. It can take values: \code{""} if no adjusting is made, \code{lp} if the adjustment is based on a linear programming that penalizes with zero norm, \code{project_lp} if the adjustment is performed using projection and linear programming (this is the default)}
+\item{adjust_prob_cond_method}{An optional string indicating the method to adjust the conditional probability so that for each candidate, the sum product of voters and conditional probabilities across groups equals the votes obtained by the candidate. It can take values: \code{""} if no adjusting is made, \code{"lp"} if the adjustment is based on a linear programming that penalizes with L1-norm, \code{"project_lp"} if the adjustment is performed using projection and linear programming (this is the default)}
 
 \item{adjust_prob_cond_every}{An optional boolean indicating whether to adjust the conditional probability on every iteration (if \code{TRUE}), or only at the conditional probabilities obtained at the end of the EM algorithm (if \code{FALSE}, this is the default). This parameter applies only if \code{adjust_prob_conditional_method} is \code{lp} or \code{project_lp}.}
+
+\item{scale_factor}{An optional numeric value used to scale down the \code{X} and \code{W} matrices before executing the EM algorithm. This scaling can help improve performance when dealing with large vote counts. For example if \code{scale_factor = 2} all elements of \code{X} and \code{W} are divided by two and rounded. The default value is \code{1}, which means no scaling is applied. In case the scaling results in mismatch between \code{W} and \code{X}, ensure that \code{allow_mismatch = TRUE}.}
+
+\item{symmetric}{A boolean indicating whether to perform a symmetric estimation. If \code{TRUE}, the algorithm runs twice: first estimating the probabilities of candidates given groups, and then estimating the probabilities of groups given candidates. The final probabilities are obtained by averaging the expected outcomes from both runs. This approach can provide a more balanced estimation in certain scenarios. The default value is \code{FALSE}.}
 
 \item{...}{Added for compability}
 }
@@ -137,6 +143,13 @@ Aditionally, it will create \code{mcmc_samples} and \code{mcmc_stepsize} paramet
 Also, if the eim object supplied is created with the function \link{simulate_election}, it also returns the real probability and unobserved votes with the name \code{real_prob} and \code{outcome} respectively. See \link{simulate_election}.
 
 If \code{group_agg} is different than \code{NULL}, two values are returned: \code{W_agg} a \verb{(b x a)} matrix with the number of voters of each aggregated group o each ballot-box, and \code{group_agg} the same input vector.
+
+Furthermore, if \code{symmetric = TRUE}, the following additional attributes are included:
+\describe{
+\item{prob_inv}{The estimated probability matrix \verb{(c x g)}, obtained by swapping \code{X} and \code{W}.}
+\item{cond_prob_inv}{A \verb{(c x g x b)} 3d-array with the probability that at each ballot-box a voter of each candidate voted for each group, given the observed outcome at the particular ballot-box.}
+}
+Under this argument, the conditional probabilities will be obtained by dividing new expected outcomes by \code{W}. The probabilities will be calculated by performing an M-step.
 }
 \description{
 Executes the Expectation-Maximization (EM) algorithm indicating the approximation method to use in the E-step.
@@ -156,6 +169,8 @@ these options. Attempting to provide more than one or none of these inputs will 
 When called with an \code{eim} object, the function updates the object with the computed results.
 If an \code{eim} object is not provided, the function will create one internally using either the
 supplied matrices or the data from the JSON file before executing the algorithm.
+
+If there are ballot-boxes with mismatch between \code{W} and \code{X}, and \code{allow_mismatch = TRUE}, then: if \code{method = "exact"}, at each ballot-box with mismatch D'Hont is applied to add or remove the necessary voters from (\code{W}) so that its total match the total number of votes (\code{X}); if method is "\code{mvn_pdf}", "\code{mvn_cdf}" or "\code{mcmc}", the number of voters (\code{W}) of the ballot-box with mismatch is scaled to match its total number of votes (\code{X}).
 }
 \examples{
 \donttest{

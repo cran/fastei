@@ -146,7 +146,10 @@ eim <- function(X = NULL, W = NULL, json_path = NULL) {
             "mvncdf_error",
             "miniter",
             "adjust_prob_cond_method",
-            "adjust_prob_cond_every"
+            "adjust_prob_cond_every",
+            "prob_inv",
+            "cond_prob_inv",
+            "expected_outcome_inv"
         )
         extra_params <- matrices[names(matrices) %in% allowed_params] # TODO: Validate them
     }
@@ -195,7 +198,7 @@ eim <- function(X = NULL, W = NULL, json_path = NULL) {
 #' - `group_proportional`: Computes the probability matrix by taking into account both group and candidate proportions. This is the default method.
 #' - `random`: Use randomized values to fill the probability matrix.
 #'
-#' @param allow_mismatch Boolean, if `TRUE`, allows a mismatch between the voters and votes for each ballot-box, only works if `method` is `"mvn_cdf"`, `"mvn_pdf"`, `"mult"` and `"mcmc"`. If `FALSE`, throws an error if there is a mismatch. By default it is `TRUE`.
+#' @param allow_mismatch Boolean, if `TRUE`, allows a mismatch between the voters and votes for each ballot-box. If `FALSE`, throws an error if there is a mismatch. By default it is `TRUE`. See **Notes** for more details.
 #'
 #' @param maxiter An optional integer indicating the maximum number of EM iterations.
 #'   The default value is `1000`.
@@ -213,7 +216,7 @@ eim <- function(X = NULL, W = NULL, json_path = NULL) {
 #'
 #' @param compute_ll An optional boolean indicating whether to compute the log-likelihood at each iteration. The default value is `TRUE`.
 #'
-#' @param adjust_prob_cond_method An optional string indicating the method to adjust the conditional probability so that for each candidate, the sum product of voters and conditional probabilities across groups equals the votes obtained by the candidate. It can take values: `""` if no adjusting is made, `lp` if the adjustment is based on a linear programming that penalizes with zero norm, `project_lp` if the adjustment is performed using projection and linear programming (this is the default)
+#' @param adjust_prob_cond_method An optional string indicating the method to adjust the conditional probability so that for each candidate, the sum product of voters and conditional probabilities across groups equals the votes obtained by the candidate. It can take values: `""` if no adjusting is made, `"lp"` if the adjustment is based on a linear programming that penalizes with L1-norm, `"project_lp"` if the adjustment is performed using projection and linear programming (this is the default)
 #'
 #' @param adjust_prob_cond_every An optional boolean indicating whether to adjust the conditional probability on every iteration (if `TRUE`), or only at the conditional probabilities obtained at the end of the EM algorithm (if `FALSE`, this is the default). This parameter applies only if `adjust_prob_conditional_method` is `lp` or `project_lp`.
 #'
@@ -243,6 +246,10 @@ eim <- function(X = NULL, W = NULL, json_path = NULL) {
 #' @param mvncdf_samples An optional integer specifying the number of Monte Carlo
 #'   samples for the `mvn_cdf` method. The default value is `5000`. This argument is only applicable when `method = "mvn_cdf"`.
 #'
+#' @param scale_factor An optional numeric value used to scale down the `X` and `W` matrices before executing the EM algorithm. This scaling can help improve performance when dealing with large vote counts. For example if `scale_factor = 2` all elements of `X` and `W` are divided by two and rounded. The default value is `1`, which means no scaling is applied. In case the scaling results in mismatch between `W` and `X`, ensure that `allow_mismatch = TRUE`.
+#'
+#' @param symmetric A boolean indicating whether to perform a symmetric estimation. If `TRUE`, the algorithm runs twice: first estimating the probabilities of candidates given groups, and then estimating the probabilities of groups given candidates. The final probabilities are obtained by averaging the expected outcomes from both runs. This approach can provide a more balanced estimation in certain scenarios. The default value is `FALSE`.
+#'
 #' @param ... Added for compability
 #'
 #' @references
@@ -261,6 +268,8 @@ eim <- function(X = NULL, W = NULL, json_path = NULL) {
 #' When called with an `eim` object, the function updates the object with the computed results.
 #' If an `eim` object is not provided, the function will create one internally using either the
 #' supplied matrices or the data from the JSON file before executing the algorithm.
+#'
+#' If there are ballot-boxes with mismatch between `W` and `X`, and `allow_mismatch = TRUE`, then: if `method = "exact"`, at each ballot-box with mismatch D'Hont is applied to add or remove the necessary voters from (`W`) so that its total match the total number of votes (`X`); if method is "`mvn_pdf`", "`mvn_cdf`" or "`mcmc`", the number of voters (`W`) of the ballot-box with mismatch is scaled to match its total number of votes (`X`).
 #'
 #' @seealso The [eim] object implementation.
 #'
@@ -289,6 +298,13 @@ eim <- function(X = NULL, W = NULL, json_path = NULL) {
 #' Also, if the eim object supplied is created with the function [simulate_election], it also returns the real probability and unobserved votes with the name `real_prob` and `outcome` respectively. See [simulate_election].
 #'
 #' If `group_agg` is different than `NULL`, two values are returned: `W_agg` a `(b x a)` matrix with the number of voters of each aggregated group o each ballot-box, and `group_agg` the same input vector.
+#'
+#' Furthermore, if `symmetric = TRUE`, the following additional attributes are included:
+#' \describe{
+#' 		\item{prob_inv}{The estimated probability matrix `(c x g)`, obtained by swapping `X` and `W`.}
+#' 		\item{cond_prob_inv}{A `(c x g x b)` 3d-array with the probability that at each ballot-box a voter of each candidate voted for each group, given the observed outcome at the particular ballot-box.}
+#' }
+#' Under this argument, the conditional probabilities will be obtained by dividing new expected outcomes by `W`. The probabilities will be calculated by performing an M-step.
 #'
 #' @examples
 #' \donttest{
@@ -347,11 +363,14 @@ run_em <- function(object = NULL,
                    mcmc_samples = 1000,
                    mcmc_stepsize = 3000,
                    mvncdf_method = "genz",
-                   mvncdf_error = 1e-5,
+                   mvncdf_error = 1e-3,
                    mvncdf_samples = 5000,
                    adjust_prob_cond_method = "project_lp",
                    adjust_prob_cond_every = FALSE,
+                   scale_factor = 1,
+                   symmetric = FALSE,
                    ...) {
+    base_call <- match.call()
     all_params <- lapply(as.list(match.call(expand.dots = TRUE)), eval, parent.frame())
     .validate_compute(all_params) # nolint
 
@@ -365,6 +384,13 @@ run_em <- function(object = NULL,
         stop("run_em: The object must be initialized with the eim() function.")
     }
 
+
+    # Applies a scaling
+    if (scale_factor != 1) {
+        object$X <- round(object$X / all_params$scale_factor)
+        object$W <- round(object$W / all_params$scale_factor)
+    }
+
     # Note: Mismatch restricted methods are checked inside .validate_compute
     mismatch_rows <- which(rowSums(object$X) != rowSums(object$W))
     if (!allow_mismatch && length(mismatch_rows) > 0) {
@@ -374,7 +400,9 @@ run_em <- function(object = NULL,
             "To allow mismatches, set `allow_mismatch = TRUE`."
         )
     } else if (method == "exact" && length(mismatch_rows) > 0) {
-        stop("run_em: Exact method isn't supported with mismatch")
+        W <- .dhondt_correction(object$W, object$X)
+        message("Applying a D'Hondt correction for correcting mismatches in W")
+        # stop("run_em: Exact method isn't supported with mismatch")
     }
 
     # Handle the group aggregation, if provided
@@ -407,7 +435,7 @@ run_em <- function(object = NULL,
         # Montecarlo samples
         object$mvncdf_samples <- if ("mvncdf_samples" %in% names(all_params)) all_params$mvncdf_samples else 5000
         # Montecarlo error
-        object$mvncdf_error <- if ("mvncdf_error" %in% names(all_params)) all_params$mvncdf_error else 1e-6
+        object$mvncdf_error <- if ("mvncdf_error" %in% names(all_params)) all_params$mvncdf_error else 1e-3
     }
 
     W <- if (is.null(object$W_agg)) object$W else object$W_agg
@@ -417,7 +445,7 @@ run_em <- function(object = NULL,
         t(object$X),
         W,
         method,
-        initial_prob,
+        if (is.character(initial_prob)) initial_prob else "custom",
         maxiter,
         maxtime,
         param_threshold,
@@ -427,11 +455,12 @@ run_em <- function(object = NULL,
         as.integer(if (!is.null(object$mcmc_stepsize)) object$mcmc_stepsize else 3000),
         as.integer(if (!is.null(object$mcmc_samples)) object$mcmc_samples else 1000),
         if (!is.null(object$mvncdf_method)) object$mvncdf_method else "genz",
-        as.numeric(if (!is.null(object$mvncdf_error)) object$mvncdf_error else 1e-6),
+        as.numeric(if (!is.null(object$mvncdf_error)) object$mvncdf_error else 1e-3),
         as.numeric(if (!is.null(object$mvncdf_samples)) object$mvncdf_samples else 5000),
         miniter,
         adjust_prob_cond_method,
-        adjust_prob_cond_every
+        adjust_prob_cond_every,
+        if (is.matrix(initial_prob)) initial_prob else matrix(-1, nrow = 1, ncol = 1)
     )
     # ---------- ... ---------- #
 
@@ -466,6 +495,44 @@ run_em <- function(object = NULL,
     object$initial_prob <- initial_prob
     object$adjust_prob_cond_method <- adjust_prob_cond_method
     object$adjust_prob_cond_every <- adjust_prob_cond_every
+
+    if (symmetric) {
+        # --- Second run with X/W swapped and symmetric = FALSE ---
+        base_call_sym <- base_call
+        base_call_sym$symmetric <- FALSE
+        base_call_sym$X <- object$W
+        base_call_sym$W <- object$X
+        base_call_sym$json_path <- NULL
+        base_call_sym$object <- NULL
+
+        inverse <- eval(base_call_sym, parent.frame())
+        # --- Reversed features ---
+        object$cond_prob_inv <- inverse$cond_prob
+        object$prob_inv <- inverse$prob
+        # object$expected_outcome_inv <- inverse$expected_outcome
+
+        # --- Accumulate time and iterations ---
+        object$time <- object$time + inverse$time
+        object$iterations <- object$iterations + inverse$iterations
+
+        # --- Symmetrize expected_outcome (G x C x B) ---
+        # inverse$expected_outcome is B x C x G (since X/W swapped)
+        A2 <- aperm(inverse$expected_outcome, c(2, 1, 3)) # G x C x B
+        object$expected_outcome <- 0.5 * (object$expected_outcome + A2)
+
+        # --- Compute cond_prob[g,c,b] = expected_outcome[g,c,b] / W[b,g] ---
+        # Work in B x G x C, divide by W (B x G), then permute back.
+        E_bgc <- aperm(object$expected_outcome, c(3, 1, 2)) # B x G x C
+        Q_bgc <- sweep(E_bgc, c(1, 2), object$W, "/") # divide by W[b,g]
+        object$cond_prob <- aperm(Q_bgc, c(2, 3, 1)) # G x C x B
+
+        # --- Compute prob[g,c] = sum_b expected_outcome[g,c,b] / sum_b W[b,g] ---
+        num <- apply(object$expected_outcome, c(1, 2), sum) # G x C (sum over B)
+        den <- colSums(object$W) # length G (sum over B)
+
+        # divide each row g by den[g]
+        object$prob <- sweep(num, 1, den, "/")
+    }
 
     invisible(object) # Updates the object.
 }
@@ -582,6 +649,13 @@ bootstrap <- function(object = NULL,
 
     # I need to define the method before on this case
     method <- if (!is.null(all_params$method)) all_params$method else "mult"
+
+    # Applies a scaling
+    if (!is.null(all_params$scale_factor) && all_params$scale_factor != 1) {
+        object$X <- round(object$X / all_params$scale_factor)
+        object$W <- round(object$W / all_params$scale_factor)
+    }
+
     # Note: Mismatch restricted methods are checked inside .validate_compute
     if (!allow_mismatch) {
         mismatch_rows <- which(rowSums(object$X) != rowSums(object$W))
@@ -594,7 +668,12 @@ bootstrap <- function(object = NULL,
             )
         }
     } else {
-        if (method == "exact") stop("run_em: Exact method isn't supported with mismatch")
+        if (method == "exact") {
+            W <- .dhondt_correction(object$W, object$X)
+        }
+        message("Applying a D'Hondt correction for correcting mismatches in W")
+
+        # stop("run_em: Exact method isn't supported with mismatch")
     }
     # Set seed for reproducibility
     if (!is.null(seed)) set.seed(seed)
@@ -640,7 +719,7 @@ bootstrap <- function(object = NULL,
         W,
         as.integer(nboot),
         as.character(method),
-        as.character(initial_prob),
+        if (is.character(initial_prob)) as.character(initial_prob) else "custom",
         as.integer(maxiter),
         as.double(maxtime),
         as.double(param_threshold),
@@ -654,7 +733,8 @@ bootstrap <- function(object = NULL,
         as.integer(mvncdf_samples),
         as.integer(miniter),
         as.character(adjust_prob_cond_method),
-        as.logical(adjust_prob_cond_every)
+        as.logical(adjust_prob_cond_every),
+        if (is.matrix(initial_prob)) initial_prob else matrix(-1, nrow = 1, ncol = 1)
     )
 
     object$sd <- result
@@ -692,6 +772,8 @@ bootstrap <- function(object = NULL,
 #' If `TRUE`, no output is returned if the method does not find a group aggregation whose standard deviation statistic is below the threshold. If `FALSE` and the latter holds, it returns the group aggregation obtained from the DP with the the lowest standard deviation statistic. See **Details** for more information. Default is `TRUE`.
 #'
 #' @inheritParams bootstrap
+#'
+#' @param allow_mismatch Boolean, if `TRUE`, allows a mismatch between the voters and votes for each ballot-box. If `FALSE`, throws an error if there is a mismatch. By default it is `TRUE`. See **Notes** in [run_em] for more details.
 #'
 #' @param ... Additional arguments passed to the [run_em] function that will execute the EM algorithm.
 #'
@@ -792,6 +874,11 @@ get_agg_proxy <- function(object = NULL,
     }
 
     # I need to define the method before
+    if (!is.null(all_params$scale_factor) && all_params$scale_factor != 1) {
+        object$X <- round(object$X / all_params$scale_factor)
+        object$W <- round(object$W / all_params$scale_factor)
+    }
+
     method <- if (!is.null(all_params$method)) all_params$method else "mult"
     # Note: Mismatch restricted methods are checked inside .validate_compute
     if (!allow_mismatch) {
@@ -805,7 +892,12 @@ get_agg_proxy <- function(object = NULL,
             )
         }
     } else {
-        if (method == "exact") stop("run_em: Exact method isn't supported with mismatch")
+        if (method == "exact") {
+            W <- .dhondt_correction(object$W, object$X)
+        }
+        message("Applying a D'Hondt correction for correcting mismatches in W")
+
+        # stop("run_em: Exact method isn't supported with mismatch")
     }
 
     # Extract parameters with defaults if missing
@@ -852,7 +944,7 @@ get_agg_proxy <- function(object = NULL,
         object$W,
         as.integer(nboot),
         as.character(method),
-        as.character(initial_prob),
+        if (is.character(initial_prob)) as.character(initial_prob) else "custom",
         as.integer(maxiter),
         as.double(maxtime),
         as.double(param_threshold),
@@ -866,7 +958,8 @@ get_agg_proxy <- function(object = NULL,
         as.integer(mvncdf_samples),
         as.integer(miniter),
         as.character(adjust_prob_cond_method),
-        as.logical(adjust_prob_cond_every)
+        as.logical(adjust_prob_cond_every),
+        if (is.matrix(initial_prob)) initial_prob else matrix(-1, nrow = 1, ncol = 1)
     )
 
     # If the returned matrix isn't the best non-feasible result
@@ -916,6 +1009,8 @@ get_agg_proxy <- function(object = NULL,
 #' @inheritParams get_agg_proxy
 #'
 #' @param ... Additional arguments passed to the [run_em] function that will execute the EM algorithm.
+#'
+#' @param allow_mismatch Boolean, if `TRUE`, allows a mismatch between the voters and votes for each ballot-box. If `FALSE`, throws an error if there is a mismatch. By default it is `TRUE`. See **Notes** in [run_em] for more details.
 #'
 #' @return
 #' It returns an eim object with the same attributes as the output of [run_em], plus the attributes:
@@ -993,6 +1088,12 @@ get_agg_opt <- function(object = NULL,
 
     # Note: Mismatch restricted methods are checked inside .validate_compute
     # Method needs to be defined before
+
+    if (!is.null(all_params$scale_factor) && all_params$scale_factor != 1) {
+        object$X <- round(object$X / all_params$scale_factor)
+        object$W <- round(object$W / all_params$scale_factor)
+    }
+
     method <- if (!is.null(all_params$method)) all_params$method else "mult"
     if (!allow_mismatch) {
         mismatch_rows <- which(rowSums(object$X) != rowSums(object$W))
@@ -1005,7 +1106,12 @@ get_agg_opt <- function(object = NULL,
             )
         }
     } else {
-        if (method == "exact") stop("run_em: Exact method isn't supported with mismatch")
+        if (method == "exact") {
+            W <- .dhondt_correction(object$W, object$X)
+        }
+        message("Applying a D'Hondt correction for correcting mismatches in W")
+
+        # stop("run_em: Exact method isn't supported with mismatch")
     }
 
     initial_prob <- if (!is.null(all_params$initial_prob)) all_params$initial_prob else "group_proportional"
@@ -1049,7 +1155,7 @@ get_agg_opt <- function(object = NULL,
         object$W,
         as.integer(nboot),
         as.character(method),
-        as.character(initial_prob),
+        if (is.character(initial_prob)) as.character(initial_prob) else "group_proportional",
         as.integer(maxiter),
         as.double(maxtime),
         as.double(param_threshold),
@@ -1064,6 +1170,7 @@ get_agg_opt <- function(object = NULL,
         as.integer(miniter),
         as.character(adjust_prob_cond_method),
         as.logical(adjust_prob_cond_every)
+        # if (is.matrix(initial_prob)) initial_prob else matrix(-1, nrow = 1, ncol = 1)
     )
 
     if (result$indices[[1]] == -1) {
@@ -1601,3 +1708,20 @@ logLik.eim <- function(object, ...) {
     }
     tail(object$logLik, 1)
 }
+
+# Maybe for a future patch, if it's needed, add the option to get the eaxct log-likelihood
+# exactLL <- function(object, scale_factor = 1) {
+#     if (is.null(object$X) || is.null(object$W) || is.null(object$prob)) {
+#         stop("The object must contain X, W and prob matrices.")
+#     }
+#
+#     # Applies a scaling
+#     if (scale_factor != 1) {
+#         object$X <- round(object$X / scale_factor)
+#         object$W <- round(object$W / scale_factor)
+#         object$W <- .dhondt_correction(object$W, object$X)
+#     }
+#
+#     ll <- computeExactLL(t(object$X), object$W, object$prob)
+#     ll
+# }

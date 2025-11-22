@@ -126,7 +126,7 @@ EMContext *createEMContext(Matrix *X, Matrix *W, const char *method, QMethodInpu
     }
     if (strcmp(method, "mvn_cdf") == 0)
     {
-        // allocateSeed(ctx, params.monteCarloIter);
+        allocateSeed(ctx, params);
     }
 
     return ctx;
@@ -190,11 +190,12 @@ void getPredictedVotes(EMContext *ctx)
  * - `x` and `w` dimensions must be coherent.
  *
  */
-void getInitialP(EMContext *ctx, const char *p_method)
+void getInitialP(EMContext *ctx, const char *p_method, Matrix *probMatrix)
 {
 
+    // bool custom_matrix = MATRIX_AT_PTR(probMatrix, 0, 0) != -1 ? true : false;
     // ---- Validation: check the method input ----//
-    if (strcmp(p_method, "uniform") != 0 && strcmp(p_method, "proportional") != 0 &&
+    if (strcmp(p_method, "custom") && strcmp(p_method, "uniform") != 0 && strcmp(p_method, "proportional") != 0 &&
         strcmp(p_method, "group_proportional") != 0 && strcmp(p_method, "random") != 0 &&
         strcmp(p_method, "mult") != 0 && strcmp(p_method, "mvn_cdf") != 0 && strcmp(p_method, "mvn_pdf") != 0 &&
         strcmp(p_method, "exact") != 0)
@@ -318,13 +319,22 @@ void getInitialP(EMContext *ctx, const char *p_method)
         }
         freeMatrix(&ballotProbability);
     }
+    else if (strcmp(p_method, "custom") == 0)
+    {
+        if (probMatrix->rows != ctx->G || probMatrix->cols != ctx->C)
+        {
+            error("Custom matrix dimensions do not match the expected size of (%d x %d).", ctx->G, ctx->C);
+        }
+        ctx->probabilities = *copMatrixPtr(probMatrix);
+    }
     else
     {
         int iterTotal, finishing_reason;
         double time, logLLarr;
         QMethodInput inputParams = {0};
-        EMContext *newCtx = EMAlgoritm(&ctx->X, &ctx->W, "group_proportional", p_method, 0.001, 0.0001, 1000, 1000,
-                                       false, &time, &iterTotal, &logLLarr, &finishing_reason, &inputParams);
+        EMContext *newCtx =
+            EMAlgoritm(&ctx->X, &ctx->W, "group_proportional", p_method, 0.001, 0.0001, 1000, 1000, false, &time,
+                       &iterTotal, &logLLarr, &finishing_reason, probMatrix, &inputParams);
         ctx->probabilities = createMatrix(newCtx->probabilities.rows, newCtx->probabilities.cols);
         ctx->q = newCtx->q;
         ctx->predicted_votes = newCtx->predicted_votes;
@@ -336,8 +346,8 @@ void getInitialP(EMContext *ctx, const char *p_method)
         size_t nel2 = nel * (size_t)newCtx->W.rows;
 
         // allocate storage for q
-        ctx->q = (double *)malloc(nel2 * sizeof *ctx->q);
-        ctx->predicted_votes = (double *)malloc(nel2 * sizeof *ctx->q);
+        ctx->q = (double *)Calloc(nel2, double);
+        ctx->predicted_votes = (double *)Calloc(nel2, double);
 
         if (!ctx->q)
         {
@@ -450,10 +460,34 @@ void getP(EMContext *ctx)
     // ---...--- //
 }
 
+bool hasMismatch(EMContext *ctx)
+{
+    for (int b = 0; b < TOTAL_BALLOTS; b++)
+    {
+        double sumW = 0.0;
+        double sumX = 0.0;
+        for (int g = 0; g < TOTAL_GROUPS; g++)
+        {
+            sumW += MATRIX_AT(ctx->W, b, g);
+        }
+        for (int c = 0; c < TOTAL_CANDIDATES; c++)
+        {
+            sumX += MATRIX_AT(ctx->X, c, b);
+        }
+        if (fabs(sumW - sumX) > 1e-6)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 void projectQ(EMContext *ctx, QMethodInput inputParams)
 {
     Matrix *X = &ctx->X;
+    Matrix *W = &ctx->W;
     Matrix *norm = &ctx->Wnorm;
+    bool mismatch = hasMismatch(ctx);
     // getPredictedVotes(ctx); // Obtain WQ
 
     Matrix temp = createMatrix(TOTAL_BALLOTS, TOTAL_CANDIDATES);
@@ -465,7 +499,20 @@ void projectQ(EMContext *ctx, QMethodInput inputParams)
             double sum = 0.0;
             for (int g = 0; g < TOTAL_GROUPS; g++)
             {
-                sum += Q_3D(ctx->q, b, g, c, TOTAL_GROUPS, TOTAL_CANDIDATES) * MATRIX_AT(ctx->W, b, g);
+                // Here we should rescale if there's a mismatch between W and X totals
+                if (!mismatch)
+                {
+                    sum += Q_3D(ctx->q, b, g, c, TOTAL_GROUPS, TOTAL_CANDIDATES) * MATRIX_AT(ctx->W, b, g);
+                }
+                else
+                {
+                    double sum_x = ctx->ballots_votes[b];
+                    double sum_w = 0.0;
+                    for (int g = 0; g < TOTAL_GROUPS; g++)
+                        sum_w += MATRIX_AT(ctx->W, b, g);
+                    sum +=
+                        Q_3D(ctx->q, b, g, c, TOTAL_GROUPS, TOTAL_CANDIDATES) * MATRIX_AT(ctx->W, b, g) * sum_x / sum_w;
+                }
             }
             MATRIX_AT(temp, b, c) = sum;
         }
@@ -546,7 +593,8 @@ int checkGroups(EMContext ctx)
  */
 EMContext *EMAlgoritm(Matrix *X, Matrix *W, const char *p_method, const char *q_method, const double convergence,
                       const double LLconvergence, const int maxIter, const double maxSeconds, const bool verbose,
-                      double *time, int *iterTotal, double *logLLarr, int *finishing_reason, QMethodInput *inputParams)
+                      double *time, int *iterTotal, double *logLLarr, int *finishing_reason, Matrix *probMatrix,
+                      QMethodInput *inputParams)
 {
     // ---- Error handling is done on getQMethodConfig!
     if (verbose)
@@ -566,7 +614,7 @@ EMContext *EMAlgoritm(Matrix *X, Matrix *W, const char *p_method, const char *q_
 
     // ---- Precomputations
     EMContext *ctx = createEMContext(X, W, q_method, *inputParams); // Allocate the important variables
-    getInitialP(ctx, p_method);                                     // Get the initial probabilities
+    getInitialP(ctx, p_method, probMatrix);                         // Get the initial probabilities
     QMethodConfig config = getQMethodConfig(q_method, *inputParams);
     double newLL;
     double oldLL = -DBL_MAX;
@@ -579,7 +627,7 @@ EMContext *EMAlgoritm(Matrix *X, Matrix *W, const char *p_method, const char *q_
         removeColumn(&ctx->W, invalidGroup);
         EMContext *newCtx =
             EMAlgoritm(&ctx->X, &ctx->W, "group_proportional", q_method, convergence, LLconvergence, maxIter,
-                       maxSeconds, verbose, time, iterTotal, logLLarr, finishing_reason, inputParams);
+                       maxSeconds, verbose, time, iterTotal, logLLarr, finishing_reason, probMatrix, inputParams);
         cleanup(ctx);
         addColumnOfZeros(&newCtx->W, invalidGroup);
         // setParameters(X, W);
@@ -628,13 +676,13 @@ EMContext *EMAlgoritm(Matrix *X, Matrix *W, const char *p_method, const char *q_
          * For avoiding loops between same iterations (such as in the case of mvn_cdf), we impose that the
          * log-likelihood shouldn't decrease from the 50th iteration and on.
          */
-        bool decreasing = oldLL > newLL && i >= 50 ? true : false;
+        bool decreasing = oldLL > newLL ? true : false;
+        bool early_stop = decreasing && strcmp(q_method, "exact") == 0 ? true : false;
 
         // ---- Check convergence ---- //
         if (i >= 1 && i >= config.params.miniter &&
-                (fabs(newLL - oldLL) < LLconvergence ||
-                 convergeMatrix(&oldProbabilities, &ctx->probabilities, convergence)) ||
-            decreasing)
+            (fabs(newLL - oldLL) < LLconvergence ||
+             convergeMatrix(&oldProbabilities, &ctx->probabilities, convergence) || early_stop))
         {
             // ---- End timer ----
             clock_gettime(CLOCK_MONOTONIC_RAW, &end);
@@ -678,11 +726,18 @@ EMContext *EMAlgoritm(Matrix *X, Matrix *W, const char *p_method, const char *q_
 results:
     config.computeQ(ctx, config.params, &newLL);
     if (strcmp(inputParams->prob_cond, "project_lp") == 0)
+    {
         projectQ(ctx, *inputParams);
+        getP(ctx); // M-Step
+    }
     else if (strcmp(inputParams->prob_cond, "lp") == 0)
+    {
         for (int b = 0; b < TOTAL_BALLOTS; b++)
             LPW(ctx, b);
+        getP(ctx); // M-Step
+    }
     getPredictedVotes(ctx); // Compute the predicted votes for each ballot box
+
     *logLLarr = newLL;
     *time = elapsed_total;
     return ctx;
@@ -692,6 +747,9 @@ results:
 // __attribute__((destructor)) // Executes when the library is ready
 void cleanup(EMContext *ctx)
 {
+    if (ctx == NULL)
+        return;
+
     TOTAL_VOTES = 0;
     TOTAL_BALLOTS = 0;
     TOTAL_CANDIDATES = 0;
@@ -700,71 +758,102 @@ void cleanup(EMContext *ctx)
     if (ctx->candidates_votes != NULL)
     {
         Free(ctx->candidates_votes);
+        ctx->candidates_votes = NULL;
     }
     if (ctx->group_votes != NULL)
     {
         Free(ctx->group_votes);
+        ctx->group_votes = NULL;
     }
     if (ctx->ballots_votes != NULL)
     {
         Free(ctx->ballots_votes);
+        ctx->ballots_votes = NULL;
     }
     if (ctx->inv_ballots_votes != NULL)
     {
         Free(ctx->inv_ballots_votes);
+        ctx->inv_ballots_votes = NULL;
     }
-    if (ctx->X.data != NULL) // Note that the columns and rows are usually stack.
-    {
+
+    if (ctx->X.data != NULL)
+    { // Note that the columns and rows are usually stack.
         freeMatrix(&ctx->X);
+        ctx->X.data = NULL;
     }
     if (ctx->W.data != NULL)
     {
         freeMatrix(&ctx->W);
+        ctx->W.data = NULL;
+    }
+    if (ctx->Wnorm.data != NULL)
+    { // <--- FALTABA
+        freeMatrix(&ctx->Wnorm);
+        ctx->Wnorm.data = NULL;
     }
     if (ctx->intW.data != NULL)
     {
         freeMatrixInt(&ctx->intW);
+        ctx->intW.data = NULL;
     }
     if (ctx->intX.data != NULL)
     {
         freeMatrixInt(&ctx->intX);
-    }
-    if (ctx->qMetropolis.data != NULL)
-    {
-        freeMatrix(&ctx->qMetropolis);
+        ctx->intX.data = NULL;
     }
     if (ctx->probabilities.data != NULL)
     {
         freeMatrix(&ctx->probabilities);
+        ctx->probabilities.data = NULL;
     }
-    if (ctx->metropolisProbability.data != NULL)
-    {
-        freeMatrix(&ctx->metropolisProbability);
-    }
+
     if (ctx->q != NULL)
     {
         Free(ctx->q);
+        ctx->q = NULL;
+    }
+    if (ctx->cdf_seeds != NULL)
+    {
+        Free(ctx->cdf_seeds);
+        ctx->cdf_seeds = NULL;
     }
     if (ctx->predicted_votes != NULL)
     {
         Free(ctx->predicted_votes);
+        ctx->predicted_votes = NULL;
     }
+
+    // ---- OmegaSet **
     if (ctx->omegaset != NULL)
     {
         for (uint32_t b = 0; b < ctx->B; b++)
         {
             if (ctx->omegaset[b] != NULL)
             {
-                for (size_t s = 0; s < ctx->omegaset[b]->size; s++)
+                OmegaSet *os = ctx->omegaset[b];
+                if (os->data != NULL)
                 {
-                    freeMatrixInt(&ctx->omegaset[b]->data[s]);
+                    for (size_t s = 0; s < os->size; s++)
+                    {
+                        freeMatrixInt(&os->data[s]); // deja os->data[s].data = NULL
+                    }
+                    Free(os->data);
+                    os->data = NULL;
                 }
-                Free(ctx->omegaset[b]->data);
-                Free(ctx->omegaset[b]);
+                if (os->counts != NULL)
+                { // <--- FALTABA
+                    Free(os->counts);
+                    os->counts = NULL;
+                }
+                Free(os);
+                ctx->omegaset[b] = NULL;
             }
         }
         Free(ctx->omegaset);
+        ctx->omegaset = NULL;
     }
+
+    // ---- multinomial [b][s]
     if (ctx->multinomial != NULL)
     {
         for (uint32_t b = 0; b < ctx->B; b++)
@@ -772,14 +861,20 @@ void cleanup(EMContext *ctx)
             if (ctx->multinomial[b] != NULL)
             {
                 Free(ctx->multinomial[b]);
+                ctx->multinomial[b] = NULL;
             }
         }
         Free(ctx->multinomial);
+        ctx->multinomial = NULL;
     }
+
     if (ctx->logGamma != NULL)
     {
         Free(ctx->logGamma);
+        ctx->logGamma = NULL;
     }
+
+    // ---- Qconstant [b][s]
     if (ctx->Qconstant != NULL)
     {
         for (uint32_t b = 0; b < ctx->B; b++)
@@ -787,45 +882,59 @@ void cleanup(EMContext *ctx)
             if (ctx->Qconstant[b] != NULL)
             {
                 Free(ctx->Qconstant[b]);
+                ctx->Qconstant[b] = NULL;
             }
         }
         Free(ctx->Qconstant);
+        ctx->Qconstant = NULL;
     }
-    if (ctx->hset)
+
+    // ---- hset: debe ser B*G si lo indexás como [b * G + g]
+    if (ctx->hset != NULL)
     {
-        for (uint32_t b = 0; b < ctx->B; ++b)
+        size_t total = (size_t)ctx->B * (size_t)ctx->G; // asegurate que así se alocó
+        for (size_t idx = 0; idx < total; ++idx)
         {
-            for (uint16_t g = 0; g < ctx->G; ++g)
+            Set *s = &ctx->hset[idx];
+            if (s->data != NULL)
             {
-                Set *s = &ctx->hset[b * ctx->G + g];
-                if (s->data)
+                for (size_t i = 0; i < s->size; ++i)
                 {
-                    for (size_t i = 0; i < s->size; ++i)
+                    if (s->data[i] != NULL)
                     {
                         Free(s->data[i]);
+                        s->data[i] = NULL;
                     }
-                    Free(s->data);
                 }
+                Free(s->data);
+                s->data = NULL;
+                s->size = 0;
             }
         }
         Free(ctx->hset);
         ctx->hset = NULL;
     }
-    if (ctx->kset)
+
+    // ---- kset: idem B*G
+    if (ctx->kset != NULL)
     {
-        for (uint32_t b = 0; b < ctx->B; ++b)
+        size_t total = (size_t)ctx->B * (size_t)ctx->G; // asegurate que así se alocó
+        for (size_t idx = 0; idx < total; ++idx)
         {
-            for (uint16_t g = 0; g < ctx->G; ++g)
+            Set *s = &ctx->kset[idx];
+            if (s->data != NULL)
             {
-                Set *s = &ctx->kset[b * ctx->G + g];
-                if (s->data)
+                for (size_t i = 0; i < s->size; ++i)
                 {
-                    for (size_t i = 0; i < s->size; ++i)
+                    if (s->data[i] != NULL)
                     {
                         Free(s->data[i]);
+                        s->data[i] = NULL;
                     }
-                    Free(s->data);
                 }
+                Free(s->data);
+                s->data = NULL;
+                s->size = 0;
             }
         }
         Free(ctx->kset);

@@ -88,6 +88,19 @@ static void ArenaCDF_free(ArenaCDF *A)
     memset(A, 0, sizeof(*A));
 }
 
+void allocateSeed(EMContext *ctx, QMethodInput params)
+{
+    GetRNGstate();
+    int total = (ctx->C - 1) * params.monteCarloIter;
+
+    ctx->cdf_seeds = (double *)Calloc(total, double);
+    for (int i = 0; i < total; i++)
+    {
+        ctx->cdf_seeds[i] = unif_rand();
+    }
+    PutRNGstate();
+}
+
 // ---- Helpers without dynamic allocation (avoid Calloc/Free in loops) ---- //
 
 /**
@@ -116,55 +129,56 @@ static inline void getRow_into(const Matrix *M, int row, double *out)
         out[c] = MATRIX_AT_PTR(M, row, c);
 }
 
-// ---- PDF into the midpoint ---- //
 static double pdf_midpoint(const Matrix *cholesky, const double *mu, const double *lower, const double *upper, int d)
 {
-    // ---- Get the middle point ---- //
+    // midpoint
     double mid[d];
     for (int i = 0; i < d; i++)
         mid[i] = 0.5 * (lower[i] + upper[i]);
-    // ---...--- //
 
-    // ---- diff = mid - mu ---- //
+    // diff = mid - mu
     double diff[d];
     for (int i = 0; i < d; i++)
-        diff[i] = mid[i] - mu[i];
-    // ---...--- //
+        diff[i] = mid[i];
+    // - mu[i];
 
-    // ---- L*z = diff ---- //
+    // Solve L z = diff  (L lower-triangular Cholesky s.t. L L^T = Σ)
     double z[d];
     for (int i = 0; i < d; i++)
     {
         double lii = MATRIX_AT_PTR(cholesky, i, i);
-        if (!(lii > 0.0))
-            return 0.0; // mal condicionada
+        if (!(lii > 0.0) || !isfinite(lii))
+            return DBL_MIN; // ill-conditioned, avoid exact zero
         double s = diff[i];
         for (int j = 0; j < i; j++)
             s -= MATRIX_AT_PTR(cholesky, i, j) * z[j];
         z[i] = s / lii;
     }
-    // ---...--- //
 
-    // ---- ||z||^2 ---- //
+    // z^T z
     double z2 = 0.0;
     for (int i = 0; i < d; i++)
         z2 += z[i] * z[i];
-    // ---...--- //
 
-    // ---- log(|Σ|^(1/2)) = sum(log(L_ii)) ---- //
+    // log|\Sigma|^{1/2} = sum(log L_ii)
     double log_det_sqrt = 0.0;
     for (int i = 0; i < d; i++)
-        log_det_sqrt += log(MATRIX_AT_PTR(cholesky, i, i));
-    // ---...--- //
+    {
+        double lii = MATRIX_AT_PTR(cholesky, i, i);
+        log_det_sqrt += log(lii);
+    }
 
-    // ---- φ(mid; μ,Σ) = (2π)^(-d/2) * exp(-0.5*||z||^2) / Π L_ii ---- //
-    double log_norm = -0.5 * d * log(M_2_PI) - log_det_sqrt;
-    double log_pdf = log_norm - 0.5 * z2;
-    double pdf = exp(log_pdf);
+    // log pdf = -0.5*d*log(2\pi) - log|\Sigma|^{1/2} - 0.5*z^T z
+    double log_pdf = -0.5 * d * M_LN_2PI - log_det_sqrt - 0.5 * z2;
 
-    return isfinite(pdf) ? pdf : 0.0;
+    // If caller needs a number in (0, ∞), clamp to avoid exact 0
+    if (log_pdf < log(DBL_MIN))
+        return DBL_MIN; // underflow guard
+    if (log_pdf > log(DBL_MAX))
+        return DBL_MAX;        // overflow guard (unlikely)
+    double pdf = exp(log_pdf); // exponentiate for getting the final result
+    return (isfinite(pdf) && pdf > 0.0) ? pdf : DBL_MIN;
 }
-
 /*
  * @brief Compute the Montecarlo approximation proposed by Alan genz towards the
  * most recent method, using univariate conditional with quasirandom numbers.
@@ -186,10 +200,10 @@ static double pdf_midpoint(const Matrix *cholesky, const double *mu, const doubl
  *
  * @return The value of the estimated integral
  */
-double genzMontecarloNew(const Matrix *cholesky, const double *lowerBounds, const double *upperBounds, double epsilon,
-                         int iterations, int mvnDim)
+double genzMontecarloNew(EMContext *ctx, const Matrix *cholesky, const double *lowerBounds, const double *upperBounds,
+                         double epsilon, int iterations, int mvnDim)
 {
-    GetRNGstate();
+    // GetRNGstate();
 
     // ---- Initialize Montecarlo variables ---- //
     double intsum = 0;
@@ -207,7 +221,11 @@ double genzMontecarloNew(const Matrix *cholesky, const double *lowerBounds, cons
         double pseudoRandom[mvnDim];
         for (int i = 0; i < mvnDim; i++)
         {
-            pseudoRandom[i] = unif_rand();
+            /* pseudoRandom[i] = unif_rand(); */
+            // pseudoRandom[i] = ctx->cdf_seeds[currentIterations * (mvnDim - 1) + i];
+            int mvnDim = ctx->C - 1;
+            pseudoRandom[i] = ctx->cdf_seeds[currentIterations * mvnDim + i];
+            /* start currentIter = 0 and ensure allocateSeed() actually ran */
         }
 
         // ---- Compute the base case
@@ -241,7 +259,7 @@ double genzMontecarloNew(const Matrix *cholesky, const double *lowerBounds, cons
         // ---...--- //
     } while (currentError > epsilon && currentIterations < iterations);
 
-    PutRNGstate();
+    /* PutRNGstate(); */
     return mean;
 }
 
@@ -269,8 +287,8 @@ double genzMontecarloNew(const Matrix *cholesky, const double *lowerBounds, cons
  *
  * @return The value of the estimated integral
  */
-double genzMontecarlo(const Matrix *cholesky, const double *lowerBounds, const double *upperBounds, double epsilon,
-                      int iterations, int mvnDim)
+double genzMontecarlo(EMContext *ctx, const Matrix *cholesky, const double *lowerBounds, const double *upperBounds,
+                      double epsilon, int iterations, int mvnDim)
 {
 
     // ---- Initialize randomizer ---- //
@@ -305,7 +323,9 @@ double genzMontecarlo(const Matrix *cholesky, const double *lowerBounds, const d
         // ---- Generate the random vector ---- //
         { // --- For each dimension
             // ---- Generate random values in [0,1) ----
-            randomVector[i] = unif_rand();
+            // randomVector[i] = unif_rand();
+            randomVector[i] = ctx->cdf_seeds[currentIterations * (mvnDim - 1) + i];
+            // ---...--- //
         }
         // ---...--- //
 
@@ -343,10 +363,10 @@ double genzMontecarlo(const Matrix *cholesky, const double *lowerBounds, const d
         // ---...--- //
         currentError = sqrt(variance / currentIterations);
 
-    } while (currentError > epsilon && currentIterations < iterations);
+    } while ((currentError > epsilon && currentIterations < iterations));
+    // Rprintf("Iterations: %d, Error: %.10f\n", currentIterations, currentError);
     // ---...--- //
     PutRNGstate();
-    // Rprintf("returning %.10f\n", intsum / currentIterations);
 
     return intsum / currentIterations;
 }
@@ -375,15 +395,14 @@ double genzMontecarlo(const Matrix *cholesky, const double *lowerBounds, const d
  * @return The result of the approximated integral
  */
 
-double Montecarlo(Matrix *chol, double *mu, double *lowerLimits, double *upperLimits, int mvnDim, int maxSamples,
+double Montecarlo(EMContext *ctx, Matrix *chol, double *lowerLimits, double *upperLimits, int mvnDim, int maxSamples,
                   double epsilon, const char *method)
 {
     // ---- Set up the initial parameter ---- //
     double result;
     // ---...--- //
     // ---- Case where there are no values ---- //
-    if (MATRIX_AT_PTR(chol, 0, 0) == 0 ||
-        memcmp(lowerLimits, upperLimits, sizeof(double) * (TOTAL_CANDIDATES - 1)) == 0)
+    if (MATRIX_AT_PTR(chol, 0, 0) == 0)
     {
         return 0;
     }
@@ -391,12 +410,12 @@ double Montecarlo(Matrix *chol, double *mu, double *lowerLimits, double *upperLi
     // ---- Perform integration ---- //
     if (strcmp(method, "genz") == 0)
     {
-        result = genzMontecarlo(chol, lowerLimits, upperLimits, epsilon, maxSamples, mvnDim);
+        result = genzMontecarlo(ctx, chol, lowerLimits, upperLimits, epsilon, maxSamples, mvnDim);
         return result;
     }
     else if (strcmp(method, "genz2") == 0)
     {
-        result = genzMontecarloNew(chol, lowerLimits, upperLimits, epsilon, maxSamples, mvnDim);
+        result = genzMontecarloNew(ctx, chol, lowerLimits, upperLimits, epsilon, maxSamples, mvnDim);
         return result;
     }
     else
@@ -435,7 +454,9 @@ static void getMainParameters(EMContext *ctx, int b, const Matrix probabilitiesR
     if (TOTAL_CANDIDATES != 2)
     {
         for (uint16_t g = 0; g < TOTAL_GROUPS; g++)
+        {
             choleskyMat(cholesky[g]);
+        }
     }
 }
 
@@ -470,6 +491,7 @@ void computeQMultivariateCDF(EMContext *ctx, QMethodInput params, double *ll)
 
     // ---- Remove last column (needed for getAverageConditional) ---- //
     Matrix P_red = removeLastColumn(P);
+    // allocateSeed(ctx, params);
 
     // ---- Optional log-likelihood array ---- //
     double *logArray = NULL;
@@ -479,6 +501,9 @@ void computeQMultivariateCDF(EMContext *ctx, QMethodInput params, double *ll)
     // ---- Arena reused across all ballots ---- //
     ArenaCDF A = ArenaCDF_init(C);
 
+    // #ifdef _OPENMP
+    // #pragma omp parallel for schedule(static) if (C >= 3 && G >= 3)
+    // #endif
     for (uint32_t b = 0; b < (uint32_t)B; b++)
     {
         // ---- Create per-ballot structures ---- //
@@ -491,10 +516,10 @@ void computeQMultivariateCDF(EMContext *ctx, QMethodInput params, double *ll)
         Matrix mu = createMatrix(G, d); // Mu matrix of dimension G x C-1
 
         // ---- Fill mu and cholesky (no alloc inside) ---- //
-        getMainParameters(ctx, (int)b, P_red, L, &mu);
+        getMainParameters(ctx, b, P_red, L, &mu);
 
         // ---- feature = X[, b] into Arena buffer ---- //
-        getColumn_into(X, (int)b, A.feature);
+        getColumn_into(X, b, A.feature);
 
         for (uint16_t g = 0; g < G; g++)
         {
@@ -508,7 +533,8 @@ void computeQMultivariateCDF(EMContext *ctx, QMethodInput params, double *ll)
                 // ---- Copy and adjust hypercube bounds ---- //
                 memcpy(A.featureA, A.feature, d * sizeof(double));
                 memcpy(A.featureB, A.feature, d * sizeof(double));
-                for (uint16_t k = 0; k < d; k++)
+                // Rprintf("Los valores de featureA y featureB son:\n");
+                for (uint16_t k = 0; k < d; k++) // d = C-1
                 {
                     A.featureA[k] -= 0.5;
                     A.featureB[k] += 0.5;
@@ -517,18 +543,16 @@ void computeQMultivariateCDF(EMContext *ctx, QMethodInput params, double *ll)
                         A.featureA[k] -= 1.0;
                         A.featureB[k] -= 1.0;
                     }
-                    if (C == 2)
-                    {
-                        A.featureA[k] -= A.mu_row[k];
-                        A.featureB[k] -= A.mu_row[k];
-                    }
+                    A.featureA[k] -= A.mu_row[k];
+                    A.featureB[k] -= A.mu_row[k];
                 }
 
                 // ---- Monte Carlo integral or closed form ---- //
                 double val;
                 if (C != 2)
                 {
-                    val = Montecarlo(Lg, A.mu_row, A.featureA, A.featureB, d, monteCarloSamples, epsilon, method);
+                    val = Montecarlo(ctx, Lg, A.featureA, A.featureB, d, monteCarloSamples, epsilon, method);
+                    // val2 = val / pow(0.02, d);
                 }
                 else
                 {
@@ -538,7 +562,12 @@ void computeQMultivariateCDF(EMContext *ctx, QMethodInput params, double *ll)
 
                 // ---- Fallback with PDF midpoint ---- //
                 if (!(val > 0.0) || !isfinite(val))
+                // if (true)
+                {
                     val = pdf_midpoint(Lg, A.mu_row, A.featureA, A.featureB, d);
+                    // Rprintf("La pdf es %.16f y val2 es %.4f\n", pdf, val2);
+                    // Rprintf("Fallback!\n");
+                }
 
                 // ---- Weight by prior probability ---- //
                 val *= MATRIX_AT_PTR(P, g, c);

@@ -41,11 +41,11 @@
     }
 
     # Initial prob argument
-    valid_p_methods <- c("group_proportional", "proportional", "uniform", "random", "mult", "mcmc", "mvn_cdf", "mvn_pdf", "exact")
-    if ("initial_prob" %in% names(args) &&
-        (!is.character(args$initial_prob) || length(args$initial_prob) != 1 || !(args$initial_prob %in% valid_p_methods))) {
-        stop("Invalid 'initial_prob'. Must be one of: ", paste(valid_p_methods, collapse = ", "))
-    }
+    # valid_p_methods <- c("group_proportional", "proportional", "uniform", "random", "mult", "mcmc", "mvn_cdf", "mvn_pdf", "exact")
+    # if ("initial_prob" %in% names(args) && (!is.matrix(args$initial_prob) ||
+    #     (!is.character(args$initial_prob) || length(args$initial_prob) != 1 || !(args$initial_prob %in% valid_p_methods)))) {
+    #     stop("Invalid 'initial_prob'. Must be one of: ", paste(valid_p_methods, collapse = ", "))
+    # }
 
     if ("maxiter" %in% names(args)) {
         if (!is.numeric(args$maxiter) || as.integer(args$maxiter) != args$maxiter || args$maxiter < 1) { # Infinite are valid, skip this case
@@ -356,4 +356,60 @@
 
     appended_list <- c(result, choosen_values)
     appended_list
+}
+
+#' Internal function!
+#' Applies dhond't correction to W and X matrices
+#' @noRd
+.dhondt_correction <- function(W, X) {
+    if (any(W < 0) || any(X < 0)) stop("W and X must be non-negative.")
+    adjust_row <- function(w, target_sum) {
+        w <- as.numeric(w)
+        cur <- sum(w)
+
+        # trivial cases
+        if (target_sum == cur) {
+            return(w)
+        }
+
+        # if row is all zeros and target > 0, start from ones via uniform weights
+        if (cur == 0 && target_sum > 0) {
+            seats <- integer(length(w))
+            for (k in seq_len(target_sum)) {
+                # uniform weights -> all quotients equal; break ties by first
+                j <- which.max(rep(1, length(w)) / (seats + 1))
+                seats[j] <- seats[j] + 1L
+            }
+            return(seats)
+        }
+
+        if (target_sum > cur) {
+            # add (target_sum - cur) units by D’Hondt on base weights w
+            add <- target_sum - cur
+            seats <- integer(length(w))
+            for (k in seq_len(add)) {
+                quot <- w / (seats + 1)
+                j <- which.max(quot)
+                seats[j] <- seats[j] + 1L
+            }
+            return(w + seats)
+        } else {
+            # remove (cur - target_sum) units greedily from the largest current entries
+            rem <- cur - target_sum
+            out <- w
+            for (k in seq_len(rem)) {
+                j <- which.max(out)
+                if (out[j] > 0) out[j] <- out[j] - 1L else break
+            }
+            return(out)
+        }
+    }
+
+    targets <- rowSums(X)
+    W_adj <- W
+    for (i in seq_len(nrow(W))) {
+        W_adj[i, ] <- adjust_row(W[i, ], targets[i])
+    }
+
+    W_adj
 }
