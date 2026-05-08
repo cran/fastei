@@ -9,7 +9,7 @@
 Package that implements the methods of \href{https://papers.ssrn.com/sol3/papers.cfm?abstract_id=4832834}{Thraves, C.,Ubilla, P. and Hermosilla, D. (2024): \emph{"A Fast Ecological Inference Algorithm for the R×C Case"}.}
 }
 \details{
-Includes a method (\link{run_em}) to solve the R\eqn{\times}C Ecological Inference problem for the non-parametric case by using the EM algorithm with different approximation methods for the E-Step. The standard deviation of the estimated probabilities can be computed using bootstrapping (\link{bootstrap}).
+Includes a method (\link{run_em}) to solve the R\eqn{\times}C ecological inference problem using the EM algorithm with different approximation methods for the E-step. Covariates are supported but not required. Standard errors of the estimated probabilities can be computed via bootstrapping (\link{bootstrap}).
 
 It also provides a function that generates synthetic election data (\link{simulate_election}) and a function that imports real election data (\link{chile_election_2021}) from the Chilean first-round presidential election of 2021.
 
@@ -56,13 +56,8 @@ Useful links:
 
 Authors:
 \itemize{
-  \item Charles Thraves \email{ctharves@dii.uchile.cl} (\href{https://orcid.org/0000-0001-7491-7477}{ORCID})
+  \item Charles Thraves \email{cthraves@dii.uchile.cl} (\href{https://orcid.org/0000-0001-7491-7477}{ORCID})
   \item Pablo Ubilla (\href{https://orcid.org/0009-0003-9048-1767}{ORCID})
-}
-
-Other contributors:
-\itemize{
-  \item Hanson Troy [contributor, copyright holder]
 }
 
 }

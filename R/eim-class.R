@@ -42,10 +42,11 @@ library(jsonlite)
 #'   \item \code{\link{save_eim}} - Saves the object to a file.
 #'   \item \code{\link{get_agg_proxy}} - Estimates an ideal group aggregation given their standard deviations.
 #'   \item \code{\link{get_agg_opt}} - Estimates an ideal group aggregation among all combinations, given the log-likelihood.
+#' 	 \item \code{\link{plot.eim}} - Plots the probability matrix.
 #'   \item \code{print.eim} - Print info about the object.
 #'   \item \code{summary.eim} - Summarize the object.
 #'   \item \code{as.matrix.eim} - Returns the probability matrix.
-#'   \item \code{logLik.eim} - Returns the final log-likelihood.
+#'   \item \code{logLik.eim} - Returns the final log-likelihood, or evaluates log-likelihood at a fixed probability matrix.
 #' }
 #'
 #' @examples
@@ -150,7 +151,17 @@ eim <- function(X = NULL, W = NULL, json_path = NULL) {
             "adjust_prob_cond_every",
             "prob_inv",
             "cond_prob_inv",
-            "expected_outcome_inv"
+            "expected_outcome_inv",
+            "LL_ind",
+            "LL_rev_ind",
+            "dLL",
+            "dLL_rev",
+            "nu",
+            "nu_rev",
+            "err_forward",
+            "err_inverse",
+            "symmetric_weights",
+            "symmetric_weight_method"
         )
         extra_params <- matrices[names(matrices) %in% allowed_params] # TODO: Validate them
     }
@@ -163,7 +174,6 @@ eim <- function(X = NULL, W = NULL, json_path = NULL) {
         X = X,
         W = W
     )
-
     # Add optional parameters if they exist
     if (length(extra_params) > 0) {
         obj <- c(obj, extra_params)
@@ -198,7 +208,6 @@ eim <- function(X = NULL, W = NULL, json_path = NULL) {
 #' - `proportional`: Assigns probabilities to each group based on the proportion of candidates votes.
 #' - `group_proportional`: Computes the probability matrix by taking into account both group and candidate proportions. This is the default method.
 #' - `random`: Use randomized values to fill the probability matrix.
-#'
 #' @param allow_mismatch Boolean, if `TRUE`, allows a mismatch between the voters and votes for each ballot-box. If `FALSE`, throws an error if there is a mismatch. By default it is `TRUE`. See **Notes** for more details.
 #'
 #' @param maxiter An optional integer indicating the maximum number of EM iterations.
@@ -209,8 +218,8 @@ eim <- function(X = NULL, W = NULL, json_path = NULL) {
 #' @param maxtime An optional numeric specifying the maximum running time (in seconds) for the
 #'   algorithm. This is checked at every iteration of the EM algorithm. The default value is `3600`, which corresponds to an hour.
 #'
-#' @param param_threshold An optional numeric value indicating the minimum difference between
-#'   consecutive probability values required to stop iterating. The default value is `0.001`. Note that the algorithm will stop if either `ll_threshold` **or** `param_threshold` is accomplished.
+#' @param param_threshold An optional numeric value indicating the maximum Frobenius norm
+#'   of the difference between consecutive probability matrices required to stop iterating. The default value is `0.001`. Note that the algorithm will stop if either `ll_threshold` **or** `param_threshold` is accomplished.
 #'
 #' @param ll_threshold An optional numeric value indicating the minimum difference between consecutive log-likelihood values to stop iterating. The default value is `inf`, essentially deactivating
 #' the threshold. Note that the algorithm will stop if either `ll_threshold` **or** `param_threshold` is accomplished.
@@ -249,7 +258,9 @@ eim <- function(X = NULL, W = NULL, json_path = NULL) {
 #'
 #' @param scale_factor An optional numeric value used to scale down the `X` and `W` matrices before executing the EM algorithm. This scaling can help improve performance when dealing with large vote counts. For example if `scale_factor = 2` all elements of `X` and `W` are divided by two and rounded. The default value is `1`, which means no scaling is applied. In case the scaling results in mismatch between `W` and `X`, ensure that `allow_mismatch = TRUE`.
 #'
-#' @param symmetric A boolean indicating whether to perform a symmetric estimation. If `TRUE`, the algorithm runs twice: first estimating the probabilities of candidates given groups, and then estimating the probabilities of groups given candidates. The final probabilities are obtained by averaging the expected outcomes from both runs. This approach can provide a more balanced estimation in certain scenarios. The default value is `FALSE`.
+#' @param symmetric A boolean indicating whether to perform a symmetric estimation. If `TRUE`, the algorithm runs twice: first estimating the probabilities of candidates given groups, and then estimating the probabilities of groups given candidates. The final probabilities are obtained by combining both directions using `symmetric_weight_method` (`"joint"` by default). The default value is `FALSE`.
+#'
+#' @param symmetric_weight_method Character string indicating how to combine both directions when `symmetric = TRUE`. Valid values are `"joint"` (default behavior: joint EM where forward/reverse E-steps are averaged each iteration using equal weights), `"average"`, `"delta_ll"` (weights based on the relative likelihood gaps), and `"mae_inverse"` (weights based on reconstruction errors).
 #'
 #' @param ... Added for compability
 #'
@@ -277,9 +288,16 @@ eim <- function(X = NULL, W = NULL, json_path = NULL) {
 #' @return
 #' The function returns an `eim` object with the function arguments and the following attributes:
 #' \describe{
-#'   \item{prob}{The estimated probability matrix `(g x c)`.}
-#' 	 \item{cond_prob}{A `(g x c x b)` 3d-array with the probability that a at each ballot-box a voter of each group voted for each candidate, given the observed outcome at the particular ballot-box.}
-#' 	 \item{expected_outcome}{A `(g x c x b)` 3d-array with the expected votes cast for each ballot box.}
+#'   \item{prob}{
+#'     The estimated global probability matrix `(g x c)`.
+#'   }
+#' 	 \item{cond_prob}{
+#'     A `(g x c x b)` 3d-array with the probability that at each ballot-box a voter of each group voted for each candidate,
+#'     given the observed outcome at the particular ballot-box.
+#'   }
+#' 	 \item{expected_outcome}{
+#'     A `(g x c x b)` 3d-array with the expected votes cast for each ballot-box.
+#'   }
 #'   \item{logLik}{The log-likelihood value from the last iteration.}
 #'   \item{iterations}{The total number of iterations performed by the EM algorithm.}
 #'   \item{time}{The total execution time of the algorithm in seconds.}
@@ -302,9 +320,11 @@ eim <- function(X = NULL, W = NULL, json_path = NULL) {
 #'
 #' Furthermore, if `symmetric = TRUE`, the following additional attributes are included:
 #' \describe{
-#' 		\item{prob_inv}{The estimated probability matrix `(c x g)`, obtained by swapping `X` and `W`.}
-#' 		\item{cond_prob_inv}{A `(c x g x b)` 3d-array with the probability that at each ballot-box a voter of each candidate voted for each group, given the observed outcome at the particular ballot-box.}
+#' 		\item{prob_inv}{The estimated probability matrix `(c x g)`, obtained by swapping `X` and `W`, when the symmetric scheme performs an explicit reverse run (for example `"average"`, `"delta_ll"`, and `"mae_inverse"`).}
+#' 		\item{cond_prob_inv}{A `(c x g x b)` 3d-array with the probability that at each ballot-box a voter of each candidate voted for each group, given the observed outcome at the particular ballot-box, when the symmetric scheme performs an explicit reverse run.}
 #' }
+#' If `symmetric_weight_method = "delta_ll"` and both `logLik` values are available, the object also includes `LL_ind`, `LL_rev_ind`, `dLL`, `dLL_rev`, `nu`, `nu_rev`, and `symmetric_weights`.
+#' If `symmetric_weight_method = "mae_inverse"`, the object also includes `err_forward`, `err_inverse`, and `symmetric_weights`.
 #' Under this argument, the conditional probabilities will be obtained by dividing new expected outcomes by `W`. The probabilities will be calculated by performing an M-step.
 #'
 #' @examples
@@ -370,6 +390,7 @@ run_em <- function(object = NULL,
                    adjust_prob_cond_every = FALSE,
                    scale_factor = 1,
                    symmetric = FALSE,
+                   symmetric_weight_method = "joint",
                    ...) {
     base_call <- match.call()
     all_params <- lapply(as.list(match.call(expand.dots = TRUE)), eval, parent.frame())
@@ -379,180 +400,45 @@ run_em <- function(object = NULL,
         set.seed(seed)
     }
 
-    if (is.null(object)) {
-        object <- eim(X, W, json_path)
-    } else if (!inherits(object, "eim")) {
-        stop("run_em: The object must be initialized with the eim() function.")
-    }
-
-
-    # Applies a scaling
-    if (scale_factor != 1) {
-        object$X <- round(object$X / all_params$scale_factor)
-        object$W <- round(object$W / all_params$scale_factor)
-    }
-
-    # Note: Mismatch restricted methods are checked inside .validate_compute
-    mismatch_rows <- which(rowSums(object$X) != rowSums(object$W))
-    if (!allow_mismatch && length(mismatch_rows) > 0) {
-        stop(
-            "run_em: Row-wise mismatch in vote totals detected.\n",
-            "Rows with mismatches: ", paste(mismatch_rows, collapse = ", "), "\n",
-            "To allow mismatches, set `allow_mismatch = TRUE`."
-        )
-    } else if (method == "exact" && length(mismatch_rows) > 0) {
-        W <- .dhondt_correction(object$W, object$X)
-        message("Applying a D'Hondt correction for correcting mismatches in W")
-        # stop("run_em: Exact method isn't supported with mismatch")
-    }
-
-    # Handle the group aggregation, if provided
-    if (!is.null(group_agg)) {
-        sizes <- diff(c(0, group_agg))
-        rep_labels <- rep(seq_along(sizes), sizes)
-        groups <- split(seq_len(ncol(object$W)), rep_labels)
-        Wagg <- do.call(
-            cbind,
-            lapply(groups, function(cols) rowSums(object$W[, cols, drop = FALSE]))
-        )
-        rownames(Wagg) <- rownames(object$W)
-        object$W_agg <- Wagg
-        object$group_agg <- group_agg
-    }
-
-    object$method <- method
-
-    # Default values
-    if (method == "mcmc") {
-        # Step size
-        object$mcmc_stepsize <- as.integer(if ("mcmc_stepsize" %in% names(all_params)) all_params$mcmc_stepsize else 3000)
-        # Samples
-        object$mcmc_samples <- as.integer(if ("mcmc_samples" %in% names(all_params)) all_params$mcmc_samples else 1000)
-        # Burn in
-        object$burn_in <- as.integer(if ("burn_in" %in% names(all_params)) all_params$burn_in else 10000)
-    } else if (method == "mvn_cdf") {
-        # Montecarlo method
-        object$mvncdf_method <- if ("mvncdf_method" %in% names(all_params)) all_params$mvncdf_method else "genz"
-        # Montecarlo samples
-        object$mvncdf_samples <- if ("mvncdf_samples" %in% names(all_params)) all_params$mvncdf_samples else 5000
-        # Montecarlo error
-        object$mvncdf_error <- if ("mvncdf_error" %in% names(all_params)) all_params$mvncdf_error else 1e-3
-    }
-
-    W <- if (is.null(object$W_agg)) object$W else object$W_agg
-    # RsetParameters(t(object$X), W)
-
-    resulting_values <- EMAlgorithmFull(
-        t(object$X),
-        W,
-        method,
-        if (is.character(initial_prob)) initial_prob else "custom",
-        maxiter,
-        maxtime,
-        param_threshold,
-        ll_threshold,
-        compute_ll,
-        verbose,
-        as.integer(if (!is.null(object$mcmc_stepsize)) object$mcmc_stepsize else 3000),
-        as.integer(if (!is.null(object$mcmc_samples)) object$mcmc_samples else 1000),
-        if (!is.null(object$mvncdf_method)) object$mvncdf_method else "genz",
-        as.numeric(if (!is.null(object$mvncdf_error)) object$mvncdf_error else 1e-3),
-        as.numeric(if (!is.null(object$mvncdf_samples)) object$mvncdf_samples else 5000),
-        miniter,
-        adjust_prob_cond_method,
-        adjust_prob_cond_every,
-        if (is.matrix(initial_prob)) initial_prob else matrix(-1, nrow = 1, ncol = 1)
+    object <- .run_em_prepare_object(
+        object = object,
+        X = X,
+        W = W,
+        json_path = json_path,
+        scale_factor = scale_factor,
+        method = method,
+        allow_mismatch = allow_mismatch,
+        group_agg = group_agg
     )
-    # ---------- ... ---------- #
 
-    object$cond_prob <- resulting_values$q
-    # object$cond_prob <- aperm(resulting_values$q, perm = c(2, 3, 1)) # Correct dimensions
-    dimnames(object$cond_prob) <- list(
-        colnames(W),
-        colnames(object$X),
-        rownames(object$X)
+    control <- list(
+        base_call = base_call,
+        caller_env = parent.frame(),
+        all_params = all_params,
+        method = method,
+        initial_prob = initial_prob,
+        maxiter = maxiter,
+        miniter = miniter,
+        maxtime = maxtime,
+        param_threshold = param_threshold,
+        ll_threshold = ll_threshold,
+        compute_ll = compute_ll,
+        verbose = verbose,
+        adjust_prob_cond_method = adjust_prob_cond_method,
+        adjust_prob_cond_every = adjust_prob_cond_every,
+        symmetric = symmetric,
+        symmetric_weight_method = symmetric_weight_method
     )
-    object$expected_outcome <- resulting_values$expected_outcome
-    dimnames(object$expected_outcome) <- list(
-        colnames(W),
-        colnames(object$X),
-        rownames(object$X)
-    )
-    object$prob <- as.matrix(resulting_values$result)
-    dimnames(object$prob) <- list(colnames(W), colnames(object$X))
-    object$iterations <- as.numeric(resulting_values$total_iterations)
-    if (compute_ll) {
-        object$logLik <- as.numeric(resulting_values$log_likelihood[length(resulting_values$log_likelihood)])
-    }
-    object$time <- resulting_values$total_time
-    object$message <- resulting_values$stopping_reason
-    object$status <- as.integer(resulting_values$finish_id)
-    # Add function arguments
-    object$miniter <- miniter
-    object$maxiter <- maxiter
-    object$maxtime <- maxtime
-    object$param_threshold <- param_threshold
-    object$ll_threshold <- ll_threshold
-    object$initial_prob <- initial_prob
-    object$adjust_prob_cond_method <- adjust_prob_cond_method
-    object$adjust_prob_cond_every <- adjust_prob_cond_every
 
-    if (symmetric) {
-        # --- Second run with X/W swapped and symmetric = FALSE ---
-        base_call_sym <- base_call
-        base_call_sym$symmetric <- FALSE
-        base_call_sym$X <- object$W
-        base_call_sym$W <- object$X
-        base_call_sym$json_path <- NULL
-        base_call_sym$object <- NULL
-        base_call_sym$scale_factor <- 1
-        ip <- all_params$initial_prob
-        if (is.matrix(ip)) {
-            col_tot_X <- colSums(object$X)
-            num <- sweep(ip, 2, col_tot_X, "*")
-            denom <- rowSums(num)
-            base_call_sym$initial_prob <- sweep(num, 1, denom, "/")
-            base_call_sym$initial_prob <- t(base_call_sym$initial_prob)
-        }
+    result <- .run_em_core(object, control)
 
-
-        inverse <- eval(base_call_sym, parent.frame())
-        # --- Reversed features ---
-        object$cond_prob_inv <- inverse$cond_prob
-        object$prob_inv <- inverse$prob
-        # object$expected_outcome_inv <- inverse$expected_outcome
-
-        # --- Accumulate time and iterations ---
-        object$time <- object$time + inverse$time
-        object$iterations <- object$iterations + inverse$iterations
-
-        # --- Symmetrize expected_outcome (G x C x B) ---
-        # inverse$expected_outcome is B x C x G (since X/W swapped)
-        A2 <- aperm(inverse$expected_outcome, c(2, 1, 3)) # G x C x B
-        object$expected_outcome <- 0.5 * (object$expected_outcome + A2)
-
-        # --- Compute cond_prob[g,c,b] = expected_outcome[g,c,b] / W[b,g] ---
-        # Work in B x G x C, divide by W (B x G), then permute back.
-        E_bgc <- aperm(object$expected_outcome, c(3, 1, 2)) # B x G x C
-        Q_bgc <- sweep(E_bgc, c(1, 2), object$W, "/") # divide by W[b,g]
-        object$cond_prob <- aperm(Q_bgc, c(2, 3, 1)) # G x C x B
-
-        # --- Compute prob[g,c] = sum_b expected_outcome[g,c,b] / sum_b W[b,g] ---
-        num <- apply(object$expected_outcome, c(1, 2), sum) # G x C (sum over B)
-        den <- colSums(object$W) # length G (sum over B)
-
-        # divide each row g by den[g]
-        object$prob <- sweep(num, 1, den, "/")
-    }
-
-    invisible(object) # Updates the object.
+    invisible(result)
 }
 
 #' Runs a Bootstrap to Estimate the **Standard Deviation** of Predicted Probabilities
 #'
 #' @description
 #' This function computes the Expected-Maximization (EM) algorithm "`nboot`" times. It then computes the standard deviation from the `nboot` estimated probability matrices on each component.
-#'
 #' @param nboot Integer specifying how many times to run the
 #'   EM algorithm.
 #'
@@ -565,7 +451,6 @@ run_em <- function(object = NULL,
 #' @param ... Additional arguments passed to the [run_em] function that will execute the EM algorithm.
 #'
 #' @inherit run_em note
-#'
 #'
 #' @seealso The [eim] object and [run_em] implementation.
 #'
@@ -639,7 +524,7 @@ bootstrap <- function(object = NULL,
 
     # Initialize eim object if needed
     if (is.null(object)) {
-        object <- eim(X, W, json_path)
+        object <- eim(X = X, W = W, json_path = json_path)
     } else if (!inherits(object, "eim")) {
         stop("Bootstrap: The object must be initialized with the `eim()` function.")
     }
@@ -882,11 +767,10 @@ get_agg_proxy <- function(object = NULL,
 
     # Initialize eim object if needed
     if (is.null(object)) {
-        object <- eim(X, W, json_path)
+        object <- eim(X = X, W = W, json_path = json_path)
     } else if (!inherits(object, "eim")) {
         stop("Bootstrap: The object must be initialized with the `eim()` function.")
     }
-
     # I need to define the method before
     if (!is.null(all_params$scale_factor) && all_params$scale_factor != 1) {
         object$X <- round(object$X / all_params$scale_factor)
@@ -1095,11 +979,10 @@ get_agg_opt <- function(object = NULL,
     if (!is.null(seed)) set.seed(seed) # Set seed for reproducibility
     # Initialize eim object if needed
     if (is.null(object)) {
-        object <- eim(X, W, json_path)
+        object <- eim(X = X, W = W, json_path = json_path)
     } else if (!inherits(object, "eim")) {
         stop("get_agg_opt: The object must be initialized with the `eim()` function.")
     }
-
     # Note: Mismatch restricted methods are checked inside .validate_compute
     # Method needs to be defined before
 
@@ -1246,6 +1129,7 @@ get_agg_opt <- function(object = NULL,
 }
 
 #' Performs a matrix-wise Wald test for two eim objects
+#'
 #'
 #' This function compares two `eim` objects (or sets of matrices that can be converted to such objects) by computing a Wald test on each component
 #' of their estimated probability matrices. The Wald test is applied using bootstrap-derived standard deviations, and the result is a matrix
@@ -1397,152 +1281,6 @@ waldtest <- function(object1 = NULL,
 }
 
 
-#' @description According to the state of the algorithm (either computed or not), it prints a message with its most relevant parameters
-#'
-#' @return Doesn't return anything. Yields messages on the console.
-#'
-#' @examples
-#' simulations <- simulate_elections(
-#'     num_ballots = 20,
-#'     num_candidates = 5,
-#'     num_groups = 3,
-#'     ballot_voters = rep(100, 20)
-#' )
-#'
-#' model <- eim(simulations$X, simulations$W)
-#' print(model) # Will print the X and W matrix.
-#' run_em(model)
-#' print(model) # Will print the X and W matrix among the EM results.
-#' @noRd
-#' @export
-print.eim <- function(x, ...) {
-    object <- x
-    cat("eim ecological inference model\n")
-    # Determine if truncation is needed
-    truncated_X <- (nrow(object$X) > 5)
-    truncated_W <- (nrow(object$W) > 5)
-    is_aggregated <- !is.null(object$W_agg)
-    is_method <- !is.null(object$method)
-    dim <- if (is_aggregated) "a" else "g"
-
-    cat("Candidates' vote matrix (X) [b x c]:\n")
-    print(object$X[1:min(5, nrow(object$X)), ], drop = FALSE) # nolint
-    if (truncated_X) cat(".\n.\n.\n") else cat("\n")
-
-    cat("Group-level voter matrix (W) [b x g]:\n")
-    print(object$W[1:min(5, nrow(object$W)), , drop = FALSE]) # nolint
-    if (truncated_W) cat(".\n.\n.\n") else cat("\n")
-
-    if (is_aggregated) {
-        cat("Macro group-level voter matrix (W_agg) [b x a]:\n")
-        print(object$W_agg[1:min(5, nrow(object$W_agg)), , drop = FALSE]) # nolint
-        truncated_W_agg <- (nrow(object$W_agg) > 5)
-        if (truncated_W_agg) cat(".\n.\n.\n") else cat("\n")
-    }
-
-    if (is_method) {
-        cat(sprintf("Estimated probability [%s x c]:\n", dim))
-        truncated_P <- (nrow(object$prob) > 5)
-        print(round(object$prob[1:min(5, nrow(object$prob)), ], 3)) # nolint
-        if (truncated_P) cat(".\n.\n.\n") else cat("\n")
-    }
-    # Consider showing matrices first
-    if (!is.null(object$sd)) {
-        cat(sprintf("Standard deviation of the estimated probability matrix [%s x c]:\n", dim))
-        truncated_boot <- (nrow(object$sd) > 5)
-        print(round(object$sd[1:min(5, nrow(object$sd)), ], 3)) # nolint
-        if (truncated_boot) cat(".\n.\n.\n") else cat("\n")
-    }
-    if (is_method) {
-        cat("Method:\t", object$method, "\n")
-        if (object$method == "mcmc") {
-            cat("Step size (M):", object$mcmc_stepsize, "\n")
-            cat("Samples (S):", object$mcmc_samples, "\n")
-        } else if (object$method == "mvn_cdf") {
-            cat("Montecarlo method:", object$mvncdf_method, "\n")
-            cat("Montecarlo iterations:", object$mvncdf_samples, "\n")
-            cat("Montecarlo error:", object$mvncdf_error, "\n")
-        }
-        cat("Total Iterations:", object$iterations, "\n")
-        cat("Total Time (s):", object$time, "\n")
-        if (!is.null(object$logLik)) {
-            cat("Log-likelihood:", tail(object$logLik, 1), "\n")
-        }
-    }
-}
-
-#' @description Shows, in form of a list, a selection of the most important attributes. It'll retrieve the method, number of candidates, ballots, groups and total votes as well as the principal results of the EM algorithm.
-#'
-#' @param object An `"eim"` object.
-#' @param ... Additional arguments that are ignored.
-#' @return A list with the chosen attributes
-#'
-#' @examples
-#'
-#' simulations <- simulate_elections(
-#'     num_ballots = 5,
-#'     num_candidates = 3,
-#'     num_groups = 2,
-#'     ballot_voters = rep(100, 5)
-#' )
-#'
-#' model <- eim(simulations$X, simulations$W)
-#' summarised <- summary(model)
-#' names(summarised)
-#' # "candidates" "groups" "ballots" "votes"
-#' @noRd
-#' @export
-summary.eim <- function(object, ...) {
-    # Generates the list with the chore attribute.
-    object_core_attr <- list(
-        candidates = ncol(object$X),
-        groups = ncol(object$W),
-        ballots = nrow(object$X)
-    )
-
-    # A list with attributes to display if the EM is computed.
-    if (!is.null(object$method)) {
-        object_run_em_attr <- list(
-            method = object$method,
-            prob = object$prob,
-            logLik = object$logLik,
-            status = object$status
-        )
-    } else {
-        object_run_em_attr <- list(
-            status = -1 # Not computed yet
-        )
-    }
-
-    # Display sd if the bootstrapping method has been called.
-    if (!is.null(object$sd)) {
-        object_run_em_attr$sd <- object$sd
-    }
-    if (!is.null(object$avg_prob)) {
-        object_run_em_attr$avg_prob <- object$avg_prob
-    }
-
-    final_list <- c(object_core_attr, object_run_em_attr)
-    final_list
-}
-
-#' Returns the object estimated probability
-#'
-#' @param object An `"eim"` object.
-#' @param ... Additional arguments that are ignored.
-#' @return The probability matrix
-#' @noRd
-#' @export
-as.matrix.eim <- function(x, ...) {
-    object <- x
-    if (is.null(object$prob)) {
-        stop(paste0(
-            "Probability matrix not available. Run 'run_em()'."
-        ))
-    }
-    return(object$prob)
-}
-
 #' Save an `eim` object to a file
 #'
 #' This function saves an `eim` object to a specified file format. Supported formats are
@@ -1621,7 +1359,7 @@ save_eim <- function(object, filename, ...) {
         for (name in names(object)) {
             val <- object[[name]]
 
-            # if it's our 3-D array cond_prob, swap dim 1 ↔ dim 3
+            # if it's our 3-D array cond_prob, swap dim 1 <-> dim 3
             if (identical(name, "cond_prob") &&
                 is.array(val) &&
                 length(dim(val)) == 3) {
@@ -1704,27 +1442,6 @@ save_eim <- function(object, filename, ...) {
 #    message("Results saved as RDS: ", filename)
 # }
 
-
-#' @title Extract log-likelihood
-#' @description
-#'   Return the log-likelihood of the last EM iteration
-#'
-#' @param object An `eim` object
-#' @param ... Additional parameters that will be ignored
-#'
-#' @return A numeric value with the log-likelihood from the last iteration.
-#' @noRd
-#' @export
-logLik.eim <- function(object, ...) {
-    if (!inherits(object, "eim")) {
-        stop("The object must be initialized with the `eim()` function.")
-    }
-
-    if (is.null(object$logLik)) {
-        stop("The `run_em()` method must be called for getting the log-likelihood.")
-    }
-    tail(object$logLik, 1)
-}
 
 # Maybe for a future patch, if it's needed, add the option to get the eaxct log-likelihood
 # exactLL <- function(object, scale_factor = 1) {

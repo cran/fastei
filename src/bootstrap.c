@@ -100,6 +100,7 @@ Matrix standardDeviations(Matrix *bootstrapResults, Matrix *sumMatrix, int total
     }
     return sdMatrix;
 }
+
 /**
  *  Returns an array of col-major matrices with bootstrapped matrices.
  *

@@ -223,9 +223,7 @@ extern "C"
     /**
      * @brief Checks if the difference of two matrices converge to a value
      *
-     * Given two matrices, it performs de absolute difference and evaluate the convergence towards a given
-     * arbitrary values: |x1 - x2| < epsilon. If there's a value whom convergence is greater than epsilon, the
-     * convergence is not achieved.
+     * Given two matrices, it evaluates convergence using the Frobenius norm of their difference.
      *
      * @param[in] matrix Matrix to perform the substraction.
      * @param[in] matrix Matrix to perform the substraction.
@@ -531,6 +529,18 @@ extern "C"
     IntMatrix copMatrixDI(const Matrix *orig);
 
     IntMatrix copMatrixI(IntMatrix *original);
+
+    /**
+     * @brief Solves a linear system H v = -g using LAPACK.
+     *
+     * Given a square matrix H and a vector g, it solves for v in H v = -g.
+     *
+     * @param[in] D Dimension of the system.
+     * @param[in,out] H Square matrix of size D x D (column-major).
+     * @param[in] g Vector of length D.
+     * @param[out] v Solution vector of length D.
+     */
+    void solve_linear_system(int D, double *H, double *g, double *v);
 
     /*
      * @brief Frees the memory allocated for an IntMatrix.

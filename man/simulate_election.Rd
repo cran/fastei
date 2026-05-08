@@ -40,8 +40,9 @@ Default value is set to \code{0.5}. See \strong{Shuffling Mechanish} for more de
 \item{prob}{Optional. A user-supplied probability matrix of dimension \verb{(g x c)}.
 If provided, this matrix is used as the underlying voting probability distribution. If not supplied, each row is sampled from a Dirichlet distribution with each parameter set to one.}
 }
+
 \value{
-An eim object with three attributes:
+An eim object containing:
 \describe{
 \item{\code{X}}{A \code{(b x c)} matrix with candidates' votes for each ballot box.}
 \item{\code{W}}{A \code{(b x g)} matrix with voters' groups for each ballot-box.}

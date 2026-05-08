@@ -29,7 +29,6 @@ SOFTWARE.
 #include <R_ext/Random.h>
 #include <Rcpp.h>
 #include <Rinternals.h>
-#include <vector>
 
 #ifndef Calloc
 #define Calloc(n, type) ((type *)R_chk_calloc((size_t)(n), sizeof(type)))
@@ -39,18 +38,39 @@ SOFTWARE.
 #define Free(p) R_chk_free((void *)(p))
 #endif
 
-Matrix convertToMatrix(const Rcpp::NumericMatrix &mat)
+// ---- Helper Function: Convert R matrix to C matrix ---- //
+static Matrix convertToMatrix(const Rcpp::NumericMatrix &mat)
 {
-    int rows = mat.nrow(), cols = mat.ncol();
-    double *data = (double *)malloc(rows * cols * sizeof(double)); // Allocate on heap
-    std::memcpy(data, mat.begin(), rows * cols * sizeof(double));  // Copy data from R matrix
-    return {data, rows, cols};                                     // Safe to return
+    int rows = mat.nrow();
+    int cols = mat.ncol();
+    double *data = Calloc(rows * cols, double);
+    if (data == NULL)
+    {
+        Rcpp::stop("Error: Failed to allocate memory for matrix conversion.");
+    }
+    std::memcpy(data, mat.begin(), rows * cols * sizeof(double));
+    return {data, rows, cols};
+}
+
+// ---- Helper Function: Release matrix data ---- //
+static void releaseMatrix(Matrix *mat)
+{
+    if (mat == NULL)
+        return;
+    if (mat->data != NULL)
+    {
+        Free(mat->data);
+        mat->data = NULL;
+    }
+    mat->rows = 0;
+    mat->cols = 0;
 }
 
 // ---- Helper Function: Initialize QMethodInput ---- //
 QMethodInput initializeQMethodInput(const std::string &EMAlg, int samples, int step_size, int monte_iter,
                                     double monte_error, int miniterations, const std::string &monte_method,
-                                    bool compute_ll, const std::string &LP_method, bool project_every)
+                                    bool compute_ll, const std::string &LP_method, bool project_every, bool symmetric,
+                                    const std::string &symmetric_weight_method)
 {
     QMethodInput inputParams = {0}; // Default initialization
 
@@ -69,6 +89,8 @@ QMethodInput initializeQMethodInput(const std::string &EMAlg, int samples, int s
     inputParams.computeLL = compute_ll;
     inputParams.prob_cond = strdup(LP_method.c_str());
     inputParams.prob_cond_every = project_every; // Weights by default
+    inputParams.symmetric = symmetric;
+    inputParams.symmetric_weight_method = strdup(symmetric_weight_method.c_str());
 
     return inputParams;
 }
@@ -95,7 +117,8 @@ Rcpp::List EMAlgorithmFull(Rcpp::NumericMatrix candidate_matrix, Rcpp::NumericMa
                            Rcpp::LogicalVector compute_ll, Rcpp::LogicalVector verbose, Rcpp::IntegerVector step_size,
                            Rcpp::IntegerVector samples, Rcpp::String monte_method, Rcpp::NumericVector monte_error,
                            Rcpp::IntegerVector monte_iter, Rcpp::IntegerVector miniterations, Rcpp::String LP_method,
-                           Rcpp::LogicalVector project_every, Rcpp::NumericMatrix initial_probabilities)
+                           Rcpp::LogicalVector project_every, Rcpp::NumericMatrix initial_probabilities,
+                           Rcpp::LogicalVector symmetric, Rcpp::String symmetric_weight_method)
 {
     std::string probabilityM = probability_method;
     std::string EMAlg = em_method;
@@ -107,9 +130,9 @@ Rcpp::List EMAlgorithmFull(Rcpp::NumericMatrix candidate_matrix, Rcpp::NumericMa
     Matrix P = convertToMatrix(initial_probabilities);
     RsetParameters(candidate_matrix, group_matrix, &X, &W);
 
-    QMethodInput inputParams =
-        initializeQMethodInput(EMAlg, samples[0], step_size[0], monte_iter[0], monte_error[0], miniterations[0],
-                               monte_method, compute_ll[0], LP_method, project_every[0]);
+    QMethodInput inputParams = initializeQMethodInput(
+        EMAlg, samples[0], step_size[0], monte_iter[0], monte_error[0], miniterations[0], monte_method, compute_ll[0],
+        LP_method, project_every[0], symmetric[0], std::string(symmetric_weight_method));
 
     EMContext *ctx = EMAlgoritm(&X, &W, probabilityM.c_str(), EMAlg.c_str(), stopping_threshold[0],
                                 log_stopping_threshold[0], maximum_iterations[0], maximum_seconds[0], verbose[0],
@@ -123,10 +146,18 @@ Rcpp::List EMAlgorithmFull(Rcpp::NumericMatrix candidate_matrix, Rcpp::NumericMa
     {
         free((void *)inputParams.simulationMethod);
     }
+    if (inputParams.prob_cond != nullptr)
+    {
+        free((void *)inputParams.prob_cond);
+    }
+    if (inputParams.symmetric_weight_method != nullptr)
+    {
+        free((void *)inputParams.symmetric_weight_method);
+    }
 
     // ---- Create human-readable stopping reason ---- //
-    std::vector<std::string> stop_reasons = {"Converged", "Maximum time reached", "Maximum iterations reached"};
-    std::string stopping_reason = (finish >= 0 && finish < 3) ? stop_reasons[finish] : "Unknown";
+    const char *stop_reasons[] = {"Converged", "Maximum time reached", "Maximum iterations reached"};
+    const char *stopping_reason = (finish >= 0 && finish < 3) ? stop_reasons[finish] : "Unknown";
 
     Rcpp::NumericMatrix RfinalProbability(Pnew->rows, Pnew->cols, Pnew->data);
 
@@ -146,11 +177,52 @@ Rcpp::List EMAlgorithmFull(Rcpp::NumericMatrix candidate_matrix, Rcpp::NumericMa
     expectedOut.attr("dim") = Rcpp::IntegerVector::create(TOTAL_GROUPS, TOTAL_CANDIDATES, TOTAL_BALLOTS);
 
     cleanup(ctx);
+    releaseMatrix(&X);
+    releaseMatrix(&W);
+    releaseMatrix(&P);
 
     return Rcpp::List::create(Rcpp::_["result"] = RfinalProbability, Rcpp::_["log_likelihood"] = logLLarr,
                               Rcpp::_["total_iterations"] = totalIter, Rcpp::_["total_time"] = timeIter,
                               Rcpp::_["stopping_reason"] = stopping_reason, Rcpp::_["finish_id"] = finish,
                               Rcpp::_["q"] = condProb, Rcpp::_["expected_outcome"] = expectedOut);
+}
+
+// [[Rcpp::export]]
+double EMLogLikFromProb(Rcpp::NumericMatrix candidate_matrix, Rcpp::NumericMatrix group_matrix,
+                        Rcpp::NumericMatrix probability_matrix, Rcpp::String em_method, Rcpp::IntegerVector step_size,
+                        Rcpp::IntegerVector samples, Rcpp::String monte_method, Rcpp::NumericVector monte_error,
+                        Rcpp::IntegerVector monte_iter, Rcpp::IntegerVector miniterations, Rcpp::String LP_method,
+                        Rcpp::LogicalVector project_every)
+{
+    std::string EMAlg = em_method;
+    Matrix X;
+    Matrix W;
+    Matrix P = convertToMatrix(probability_matrix);
+    RsetParameters(candidate_matrix, group_matrix, &X, &W);
+
+    QMethodInput inputParams =
+        initializeQMethodInput(EMAlg, samples[0], step_size[0], monte_iter[0], monte_error[0], miniterations[0],
+                               monte_method, true, LP_method, project_every[0], false, "average");
+
+    double ll = computeLogLikForProbability(&X, &W, &P, EMAlg.c_str(), &inputParams);
+
+    if (inputParams.simulationMethod != nullptr)
+    {
+        free((void *)inputParams.simulationMethod);
+    }
+    if (inputParams.prob_cond != nullptr)
+    {
+        free((void *)inputParams.prob_cond);
+    }
+    if (inputParams.symmetric_weight_method != nullptr)
+    {
+        free((void *)inputParams.symmetric_weight_method);
+    }
+
+    releaseMatrix(&X);
+    releaseMatrix(&W);
+    releaseMatrix(&P);
+    return ll;
 }
 
 // ---- Run Bootstrapping Algorithm ---- //
@@ -180,16 +252,23 @@ Rcpp::List bootstrapAlg(Rcpp::NumericMatrix candidate_matrix, Rcpp::NumericMatri
 
     QMethodInput inputParams =
         initializeQMethodInput(EMAlg, samples[0], step_size[0], monte_iter[0], monte_error[0], miniterations[0],
-                               monte_method, compute_ll[0], LP_method, project_every[0]);
+                               monte_method, compute_ll[0], LP_method, project_every[0], false, "average");
 
     Matrix avgProb = {NULL, 0, 0};
-    Matrix sdResult =
-        bootstrapA(&XR, &WR, nboot[0], EMAlg.c_str(), probabilityM.c_str(), stopping_threshold[0],
-                   log_stopping_threshold[0], maximum_iterations[0], maximum_seconds[0], verbose[0], &P,
-                   &inputParams, &avgProb);
+    Matrix sdResult = bootstrapA(&XR, &WR, nboot[0], EMAlg.c_str(), probabilityM.c_str(), stopping_threshold[0],
+                                 log_stopping_threshold[0], maximum_iterations[0], maximum_seconds[0], verbose[0], &P,
+                                 &inputParams, &avgProb);
     if (inputParams.simulationMethod != nullptr)
     {
         free((void *)inputParams.simulationMethod);
+    }
+    if (inputParams.prob_cond != nullptr)
+    {
+        free((void *)inputParams.prob_cond);
+    }
+    if (inputParams.symmetric_weight_method != nullptr)
+    {
+        free((void *)inputParams.symmetric_weight_method);
     }
 
     // Convert to R's matrix
@@ -207,6 +286,9 @@ Rcpp::List bootstrapAlg(Rcpp::NumericMatrix candidate_matrix, Rcpp::NumericMatri
 
     freeMatrix(&sdResult);
     freeMatrix(&avgProb);
+    releaseMatrix(&XR);
+    releaseMatrix(&WR);
+    releaseMatrix(&P);
 
     return Rcpp::List::create(Rcpp::_["sd"] = output, Rcpp::_["avg_prob"] = avg_output);
 }
@@ -241,11 +323,11 @@ Rcpp::List groupAgg(Rcpp::String sd_statistic, Rcpp::NumericVector sd_threshold,
 
     QMethodInput inputParams =
         initializeQMethodInput(EMAlg, samples[0], step_size[0], monte_iter[0], monte_error[0], miniterations[0],
-                               monte_method, compute_ll[0], LP_method, project_every[0]);
+                               monte_method, compute_ll[0], LP_method, project_every[0], false, "average");
 
     // We'll hold the boundary indices here
     int G = WR.cols;
-    int *cuttingBuffer = new int[G];
+    int *cuttingBuffer = Calloc(G, int);
     int usedCuts = 0; // how many boundaries we actually use
     bool bestResult = false;
 
@@ -257,6 +339,14 @@ Rcpp::List groupAgg(Rcpp::String sd_statistic, Rcpp::NumericVector sd_threshold,
     if (inputParams.simulationMethod != nullptr)
     {
         free((void *)inputParams.simulationMethod);
+    }
+    if (inputParams.prob_cond != nullptr)
+    {
+        free((void *)inputParams.prob_cond);
+    }
+    if (inputParams.symmetric_weight_method != nullptr)
+    {
+        free((void *)inputParams.symmetric_weight_method);
     }
     // Convert to R's matrix
     Rcpp::NumericMatrix output(sdResult.rows, sdResult.cols);
@@ -273,8 +363,10 @@ Rcpp::List groupAgg(Rcpp::String sd_statistic, Rcpp::NumericVector sd_threshold,
 
     // Free native memory
     freeMatrix(&sdResult);
-    // free(cuttingBuffer);
-    delete[] cuttingBuffer;
+    Free(cuttingBuffer);
+    releaseMatrix(&XR);
+    releaseMatrix(&WR);
+    releaseMatrix(&P);
 
     return Rcpp::List::create(Rcpp::_["bootstrap_result"] = output, Rcpp::_["indices"] = result,
                               Rcpp::_["best_result"] = bestResult);
@@ -319,13 +411,13 @@ Rcpp::List groupAggGreedy(Rcpp::String sd_statistic, Rcpp::NumericVector sd_thre
     // For storing the final partition boundaries
     // 'G' can be up to WR.cols. You might want a vector of size G.
     int G = WR.cols;
-    int *boundaries = new int[G - 1];
+    int *boundaries = Calloc(G - 1, int);
     int numCuts = 0;
     Matrix *bestBootstrap = NULL;
 
     QMethodInput inputParams =
         initializeQMethodInput(EMAlg, samples[0], step_size[0], monte_iter[0], monte_error[0], miniterations[0],
-                               monte_method, compute_ll[0], LP_method, project_every[0]);
+                               monte_method, compute_ll[0], LP_method, project_every[0], false, "average");
 
     Matrix greedyP =
         aggregateGroupsExhaustive(&XR, &WR, boundaries, &numCuts, set_method.c_str(), nboot[0], sd_threshold[0],
@@ -337,19 +429,29 @@ Rcpp::List groupAggGreedy(Rcpp::String sd_statistic, Rcpp::NumericVector sd_thre
     {
         free((void *)inputParams.simulationMethod);
     }
+    if (inputParams.prob_cond != nullptr)
+    {
+        free((void *)inputParams.prob_cond);
+    }
+    if (inputParams.symmetric_weight_method != nullptr)
+    {
+        free((void *)inputParams.symmetric_weight_method);
+    }
 
     if (numCuts == 0) // Case where there's not any match
     {
         freeMatrix(&greedyP);
-        freeMatrix(&XR);
-        freeMatrix(&WR);
+        releaseMatrix(&XR);
+        releaseMatrix(&WR);
+        releaseMatrix(&P);
+        Free(boundaries);
         return Rcpp::List::create(Rcpp::_["indices"] = Rcpp::IntegerVector::create(-1));
     }
 
     // ---- Create human-readable stopping reason ---- //
-    std::vector<std::string> stop_reasons = {"Converged", "Log-likelihood decrease", "Maximum time reached",
-                                             "Maximum iterations reached"};
-    std::string stopping_reason = (finishReason >= 0 && finishReason < 4) ? stop_reasons[finishReason] : "Unknown";
+    const char *stop_reasons[] = {"Converged", "Log-likelihood decrease", "Maximum time reached",
+                                  "Maximum iterations reached"};
+    const char *stopping_reason = (finishReason >= 0 && finishReason < 4) ? stop_reasons[finishReason] : "Unknown";
 
     Rcpp::NumericMatrix probabilities(greedyP.rows, greedyP.cols);
 
@@ -378,13 +480,14 @@ Rcpp::List groupAggGreedy(Rcpp::String sd_statistic, Rcpp::NumericVector sd_thre
     expectedOut.attr("dim") = Rcpp::IntegerVector::create(greedyP.rows, greedyP.cols, WR.rows);
 
     // condProb.attr("dim") = Rcpp::IntegerVector::create(WR.rows, greedyP.rows, XR.rows); // (b, A, c)
-    free(bestQ);
-    free(bestExpected);
+    Free(bestQ);
+    Free(bestExpected);
     freeMatrix(&greedyP);
     freeMatrix(bestBootstrap);
     Free(bestBootstrap);
-    freeMatrix(&XR);
-    freeMatrix(&WR);
+    releaseMatrix(&XR);
+    releaseMatrix(&WR);
+    releaseMatrix(&P);
 
     // Convert to R's integer vector
     Rcpp::IntegerVector result(numCuts);
@@ -393,7 +496,7 @@ Rcpp::List groupAggGreedy(Rcpp::String sd_statistic, Rcpp::NumericVector sd_thre
         result[i] = boundaries[i];
     }
 
-    delete[] boundaries;
+    Free(boundaries);
 
     return Rcpp::List::create(Rcpp::_["probabilities"] = probabilities, Rcpp::_["log_likelihood"] = bestLogLL,
                               Rcpp::_["total_iterations"] = totalIter, Rcpp::_["total_time"] = bestTime,

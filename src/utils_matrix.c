@@ -417,9 +417,7 @@ void fillMatrix(Matrix *matrix, const double value)
 /**
  * @brief Checks if the difference of two matrices converge to a value
  *
- * Given two matrices, it performs de absolute difference and evaluate the convergence towards a given
- * arbitrary values: |x1 - x2| < epsilon. If there's a value whom convergence is greater than epsilon, the convergence
- * is not achieved.
+ * Given two matrices, it evaluates convergence using the Frobenius norm of their difference.
  *
  * @param[in] matrix Matrix to perform the substraction.
  * @param[in] matrix Matrix to perform the substraction.
@@ -485,19 +483,9 @@ bool convergeMatrix(const Matrix *matrixA, const Matrix *matrixB, const double c
     F77_CALL(dcopy)(&(size), matrixA->data, &incX, diff, &incY);
     F77_CALL(daxpy)(&(size), &alpha, matrixB->data, &incX, diff, &incY);
 
-    for (int i = 0; i < size; i++)
-    {
-        // If there's a value whom convergence is greater than epsilon, the convergence
-        // isn't achieved.
-        if (fabs(diff[i]) >= convergence)
-        {
-            Free(diff);
-            return false;
-        }
-    }
-
+    double norm = F77_CALL(dnrm2)(&size, diff, &incX);
     Free(diff);
-    return true;
+    return norm < convergence;
 }
 
 /**
@@ -1487,4 +1475,24 @@ void printMatrixInt(IntMatrix *matrix)
         Rprintf("%df", MATRIX_AT_PTR(matrix, i, matrix->cols - 1));
         Rprintf(" |\n");
     }
+}
+
+void solve_linear_system(int D, double *H, double *g, double *v)
+{
+    for (int i = 0; i < D; i++)
+        v[i] = -g[i];
+
+    BLAS_INT N = (BLAS_INT)D;
+    BLAS_INT NRHS = 1;
+    BLAS_INT LDA = (BLAS_INT)D;
+    BLAS_INT LDB = (BLAS_INT)D;
+    BLAS_INT info;
+    BLAS_INT *ipiv = (BLAS_INT *)Calloc(D, BLAS_INT);
+
+    F77_CALL(dgesv)(&N, &NRHS, H, &LDA, ipiv, v, &LDB, &info);
+
+    if (info != 0)
+        error("DGESV failed with info = %d", (int)info);
+
+    Free(ipiv);
 }

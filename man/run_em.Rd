@@ -31,6 +31,7 @@ run_em(
   adjust_prob_cond_every = FALSE,
   scale_factor = 1,
   symmetric = FALSE,
+  symmetric_weight_method = "joint",
   ...
 )
 }
@@ -74,8 +75,7 @@ The default value is \code{1000}.}
 \item{maxtime}{An optional numeric specifying the maximum running time (in seconds) for the
 algorithm. This is checked at every iteration of the EM algorithm. The default value is \code{3600}, which corresponds to an hour.}
 
-\item{param_threshold}{An optional numeric value indicating the minimum difference between
-consecutive probability values required to stop iterating. The default value is \code{0.001}. Note that the algorithm will stop if either \code{ll_threshold} \strong{or} \code{param_threshold} is accomplished.}
+\item{param_threshold}{An optional numeric value indicating the maximum Frobenius norm of the difference between consecutive probability matrices required to stop iterating. The default value is \code{0.001}. Note that the algorithm will stop if either \code{ll_threshold} \strong{or} \code{param_threshold} is accomplished.}
 
 \item{ll_threshold}{An optional numeric value indicating the minimum difference between consecutive log-likelihood values to stop iterating. The default value is \code{inf}, essentially deactivating
 the threshold. Note that the algorithm will stop if either \code{ll_threshold} \strong{or} \code{param_threshold} is accomplished.}
@@ -114,16 +114,25 @@ samples for the \code{mvn_cdf} method. The default value is \code{5000}. This ar
 
 \item{scale_factor}{An optional numeric value used to scale down the \code{X} and \code{W} matrices before executing the EM algorithm. This scaling can help improve performance when dealing with large vote counts. For example if \code{scale_factor = 2} all elements of \code{X} and \code{W} are divided by two and rounded. The default value is \code{1}, which means no scaling is applied. In case the scaling results in mismatch between \code{W} and \code{X}, ensure that \code{allow_mismatch = TRUE}.}
 
-\item{symmetric}{A boolean indicating whether to perform a symmetric estimation. If \code{TRUE}, the algorithm runs twice: first estimating the probabilities of candidates given groups, and then estimating the probabilities of groups given candidates. The final probabilities are obtained by averaging the expected outcomes from both runs. This approach can provide a more balanced estimation in certain scenarios. The default value is \code{FALSE}.}
+\item{symmetric}{A boolean indicating whether to perform a symmetric estimation. If \code{TRUE}, the algorithm runs twice: first estimating the probabilities of candidates given groups, and then estimating the probabilities of groups given candidates. The final probabilities are obtained by combining both directions using \code{symmetric_weight_method} (\code{"joint"} by default). The default value is \code{FALSE}.}
+
+\item{symmetric_weight_method}{Character string indicating how to combine both directions when \code{symmetric = TRUE}. Valid values are \code{"joint"} (default behavior: joint EM where forward and reverse E-steps are averaged each iteration using equal weights), \code{"average"} (preserves the historical two-run average), \code{"delta_ll"} (weights based on the relative likelihood gaps \code{tau = (LL - LL_ind) / abs(LL)} and \code{tau_rev = (LL_rev - LL_rev_ind) / abs(LL_rev)}), and \code{"mae_inverse"} (weights based on reconstruction errors \code{tau = sum(abs(X - W \%*\% p))} and \code{tau_rev = sum(abs(W - X \%*\% p_rev))}).}
 
 \item{...}{Added for compability}
 }
 \value{
 The function returns an \code{eim} object with the function arguments and the following attributes:
 \describe{
-\item{prob}{The estimated probability matrix \verb{(g x c)}.}
-\item{cond_prob}{A \verb{(g x c x b)} 3d-array with the probability that a at each ballot-box a voter of each group voted for each candidate, given the observed outcome at the particular ballot-box.}
-\item{expected_outcome}{A \verb{(g x c x b)} 3d-array with the expected votes cast for each ballot box.}
+\item{prob}{
+The estimated global probability matrix \verb{(g x c)}.
+}
+\item{cond_prob}{
+A \verb{(g x c x b)} 3d-array with the probability that at each ballot-box a voter of each group voted for each candidate,
+given the observed outcome at the particular ballot-box.
+}
+\item{expected_outcome}{
+A \verb{(g x c x b)} 3d-array with the expected votes cast for each ballot-box.
+}
 \item{logLik}{The log-likelihood value from the last iteration.}
 \item{iterations}{The total number of iterations performed by the EM algorithm.}
 \item{time}{The total execution time of the algorithm in seconds.}
@@ -146,9 +155,11 @@ If \code{group_agg} is different than \code{NULL}, two values are returned: \cod
 
 Furthermore, if \code{symmetric = TRUE}, the following additional attributes are included:
 \describe{
-\item{prob_inv}{The estimated probability matrix \verb{(c x g)}, obtained by swapping \code{X} and \code{W}.}
-\item{cond_prob_inv}{A \verb{(c x g x b)} 3d-array with the probability that at each ballot-box a voter of each candidate voted for each group, given the observed outcome at the particular ballot-box.}
+\item{prob_inv}{The estimated probability matrix \verb{(c x g)}, obtained by swapping \code{X} and \code{W}, when the symmetric scheme performs an explicit reverse run (for example \code{"average"}, \code{"delta_ll"}, and \code{"mae_inverse"}).}
+\item{cond_prob_inv}{A \verb{(c x g x b)} 3d-array with the probability that at each ballot-box a voter of each candidate voted for each group, given the observed outcome at the particular ballot-box, when the symmetric scheme performs an explicit reverse run.}
 }
+If \code{symmetric_weight_method = "delta_ll"} and both \code{logLik} values are available, the object also includes \code{LL_ind}, \code{LL_rev_ind}, \code{dLL}, \code{dLL_rev}, \code{nu}, \code{nu_rev}, and \code{symmetric_weights}.
+If \code{symmetric_weight_method = "mae_inverse"}, the object also includes \code{err_forward}, \code{err_inverse}, and \code{symmetric_weights}.
 Under this argument, the conditional probabilities will be obtained by dividing new expected outcomes by \code{W}. The probabilities will be calculated by performing an M-step.
 }
 \description{
