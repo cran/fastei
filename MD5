@@ -1,4 +1,4 @@
-d8f38558a2c00ab7067f6ffecc311562 *DESCRIPTION
+a2a49d573ff62ba765ef6a2e79782c27 *DESCRIPTION
 6410b8bd84dec9374378249bad83739f *LICENSE
 03248f81fc73e26dd256ae7dfad09b0e *NAMESPACE
 8377bd9a9f147dee367c1f460091454b *R/RcppExports.R
@@ -14,7 +14,7 @@ d1022bc7be036a48f2c2ef256b118a69 *README.md
 66d9b2976775cd588c2c9a6f54df1cfd *data/chile_election_2021.rda
 52ceb4af9fb54741a20da43b5756086e *inst/doc/demonstration.R
 1f4e3a795bf7170f885e3dcc7bdc4a42 *inst/doc/demonstration.Rmd
-393a05519b5f217cae4aa0efda37fe27 *inst/doc/demonstration.html
+c2e164572e2d2baa7dc65ef27633b3fe *inst/doc/demonstration.html
 5e64629a0b5442a54448d071eeb818ea *man/bootstrap.Rd
 afc51743ca8e611cb4fa24220feba63d *man/chile_election_2021.Rd
 01e7a19b9d14e31eec3708d580eedb46 *man/eim.Rd
@@ -42,7 +42,7 @@ e24adff0f0e883444e29de7cffbed175 *src/exact.h
 5362385015b846a9b854f081d9cf7caf *src/globals.h
 0cdb8fa8c642532d7c9e7fe6a2b46d53 *src/main.c
 6bb6d2c7a8fadcace5df9cc89335a235 *src/main.h
-7554ed1e8305f804277a1ece6b499180 *src/main_symmetric.c
+af6e49f8bdcb88c5b3718c2d650c8470 *src/main_symmetric.c
 6ce43444046da7d0fd4f07d7eb8270e7 *src/main_symmetric.h
 6cd0272b2d346eb88ce2f25db3b224dd *src/multinomial.c
 b54ce992a71c8748bcff36154dbb6cd4 *src/multinomial.h
@@ -57,7 +57,7 @@ eecb1bed5768dbe8df00e06163373b40 *src/utils_hash.h
 9d51f2fe4e437ef129f391672539a70d *src/utils_matrix.h
 24cf5ea73ab1853b7de965787cdfd52a *src/utils_multivariate.c
 f79516a6fc5f40612a3e33c277abc9cf *src/utils_multivariate.h
-5c9cf1f482f175d9eb8a44e6825124a4 *src/wrapper.cpp
+a9c560a61a3d616890764c5896f2c890 *src/wrapper.cpp
 a99825a9dd4b8bc537483dc6dbd62e2c *src/wrapper.h
 4a306cdc2a7c6bbd89a65addfe628a7d *tests/testthat.R
 34262abc0e8df29aae3b39f72d1aeec3 *tests/testthat/helper-eim.R
