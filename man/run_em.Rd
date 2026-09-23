@@ -75,7 +75,8 @@ The default value is \code{1000}.}
 \item{maxtime}{An optional numeric specifying the maximum running time (in seconds) for the
 algorithm. This is checked at every iteration of the EM algorithm. The default value is \code{3600}, which corresponds to an hour.}
 
-\item{param_threshold}{An optional numeric value indicating the maximum Frobenius norm of the difference between consecutive probability matrices required to stop iterating. The default value is \code{0.001}. Note that the algorithm will stop if either \code{ll_threshold} \strong{or} \code{param_threshold} is accomplished.}
+\item{param_threshold}{An optional numeric value indicating the maximum Frobenius norm
+of the difference between consecutive probability matrices required to stop iterating. The default value is \code{0.001}. Note that the algorithm will stop if either \code{ll_threshold} \strong{or} \code{param_threshold} is accomplished.}
 
 \item{ll_threshold}{An optional numeric value indicating the minimum difference between consecutive log-likelihood values to stop iterating. The default value is \code{inf}, essentially deactivating
 the threshold. Note that the algorithm will stop if either \code{ll_threshold} \strong{or} \code{param_threshold} is accomplished.}
@@ -108,15 +109,15 @@ when \code{method = "mvn_cdf"}.}
 \item{mvncdf_samples}{An optional integer specifying the number of Monte Carlo
 samples for the \code{mvn_cdf} method. The default value is \code{5000}. This argument is only applicable when \code{method = "mvn_cdf"}.}
 
-\item{adjust_prob_cond_method}{An optional string indicating the method to adjust the conditional probability so that for each candidate, the sum product of voters and conditional probabilities across groups equals the votes obtained by the candidate. It can take values: \code{""} if no adjusting is made, \code{"lp"} if the adjustment is based on a linear programming that penalizes with L1-norm, \code{"project_lp"} if the adjustment is performed using projection and linear programming (this is the default)}
+\item{adjust_prob_cond_method}{An optional string indicating the method used to adjust the conditional probabilities so that, for each candidate, the sum of the products of the number of voters and the conditional probabilities across groups equals the number of votes obtained by that candidate. It can take the following values: \code{""} if no adjustment is made; \code{"lp"} if the adjustment is based on a linear program that penalizes using the L1 norm; \code{"kl"} if the estimated-count table is projected in KL divergence using iterative proportional fitting; or \code{"project_lp"} if it is projected onto the accounting-identity hyperplane and an LP is solved when a probability is negative. The default is \code{"lp"} for Joint-EM (\code{symmetric = TRUE} and \code{symmetric_weight_method = "joint"}) and \code{"project_lp"} otherwise. \code{"project_lp"} is not supported in Joint-EM: requesting it issues a warning and runs \code{"lp"} instead. In the other modes, it retains the projection-plus-LP adjustment.}
 
-\item{adjust_prob_cond_every}{An optional boolean indicating whether to adjust the conditional probability on every iteration (if \code{TRUE}), or only at the conditional probabilities obtained at the end of the EM algorithm (if \code{FALSE}, this is the default). This parameter applies only if \code{adjust_prob_conditional_method} is \code{lp} or \code{project_lp}.}
+\item{adjust_prob_cond_every}{An optional boolean indicating whether to adjust the conditional probability on every iteration (if \code{TRUE}), or only at the conditional probabilities obtained at the end of the EM algorithm (if \code{FALSE}, this is the default). This parameter applies only if \code{adjust_prob_conditional_method} is \code{lp}, \code{kl}, or \code{project_lp}.}
 
 \item{scale_factor}{An optional numeric value used to scale down the \code{X} and \code{W} matrices before executing the EM algorithm. This scaling can help improve performance when dealing with large vote counts. For example if \code{scale_factor = 2} all elements of \code{X} and \code{W} are divided by two and rounded. The default value is \code{1}, which means no scaling is applied. In case the scaling results in mismatch between \code{W} and \code{X}, ensure that \code{allow_mismatch = TRUE}.}
 
 \item{symmetric}{A boolean indicating whether to perform a symmetric estimation. If \code{TRUE}, the algorithm runs twice: first estimating the probabilities of candidates given groups, and then estimating the probabilities of groups given candidates. The final probabilities are obtained by combining both directions using \code{symmetric_weight_method} (\code{"joint"} by default). The default value is \code{FALSE}.}
 
-\item{symmetric_weight_method}{Character string indicating how to combine both directions when \code{symmetric = TRUE}. Valid values are \code{"joint"} (default behavior: joint EM where forward and reverse E-steps are averaged each iteration using equal weights), \code{"average"} (preserves the historical two-run average), \code{"delta_ll"} (weights based on the relative likelihood gaps \code{tau = (LL - LL_ind) / abs(LL)} and \code{tau_rev = (LL_rev - LL_rev_ind) / abs(LL_rev)}), and \code{"mae_inverse"} (weights based on reconstruction errors \code{tau = sum(abs(X - W \%*\% p))} and \code{tau_rev = sum(abs(W - X \%*\% p_rev))}).}
+\item{symmetric_weight_method}{Character string indicating how to combine both directions when \code{symmetric = TRUE}. Valid values are \code{"joint"} (default behavior: joint EM where forward/reverse E-steps are averaged each iteration using equal weights), \code{"average"}, \code{"delta_ll"} (weights based on the relative likelihood gaps), and \code{"mae_inverse"} (weights based on reconstruction errors).}
 
 \item{...}{Added for compability}
 }
@@ -220,7 +221,7 @@ run_em(
 
 }
 \references{
-\href{https://papers.ssrn.com/sol3/papers.cfm?abstract_id=4832834}{Thraves, C., Ubilla, P. and Hermosilla, D.: \emph{"Fast Ecological Inference Algorithm for the RxC Case"}}. Aditionally, the MVN CDF is computed by the methods introduced in \href{https://www.researchgate.net/publication/2463953_Numerical_Computation_Of_Multivariate_Normal_Probabilities}{Genz, A. (2000). Numerical computation of multivariate normal probabilities. \emph{Journal of Computational and Graphical Statistics}}
+\href{https://link.springer.com/article/10.1007/s11222-026-10946-1}{Ubilla Pavez, P., Hermosilla, D. and Thraves, C. (2026): \emph{"An accurate, fast, and scalable ecological inference algorithm for the R×C case"}. Statistics and Computing, 36, Article 195.}. Aditionally, the MVN CDF is computed by the methods introduced in \href{https://www.researchgate.net/publication/2463953_Numerical_Computation_Of_Multivariate_Normal_Probabilities}{Genz, A. (2000). Numerical computation of multivariate normal probabilities. \emph{Journal of Computational and Graphical Statistics}}
 }
 \seealso{
 The \link{eim} object implementation.

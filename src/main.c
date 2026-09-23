@@ -21,6 +21,7 @@ SOFTWARE.
 */
 
 #include "main.h"
+#include "KL.h"
 #include "main_symmetric.h"
 #include "globals.h"
 #include "utils_matrix.h"
@@ -150,7 +151,7 @@ void precomputeScaleFactors(double *scale_factors, Matrix *X, Matrix *W)
             sum_x += MATRIX_AT_PTR(X, c, b);
         for (int g = 0; g < TOTAL_GROUPS; g++)
             sum_w += MATRIX_AT_PTR(W, b, g);
-        double escala = sum_x / sum_w;
+        double escala = sum_w > 0.0 ? sum_x / sum_w : 1.0;
         scale_factors[b] = escala;
     }
 }
@@ -169,6 +170,8 @@ Matrix precomputeNorm(double *scale_factors, Matrix *X, Matrix *W)
             sum += MATRIX_AT_PTR(W, b, g) * MATRIX_AT_PTR(W, b, g);
         }
         sum *= scale_factors[b];
+        if (!(sum > 0.0) || !isfinite(sum))
+            continue;
         for (int g = 0; g < TOTAL_GROUPS; g++)
         {
             MATRIX_AT(returnMat, b, g) = MATRIX_AT_PTR(W, b, g) / sum;
@@ -773,6 +776,10 @@ EMContext *EMAlgoritm(Matrix *X, Matrix *W, const char *p_method, const char *q_
         {
             if (strcmp(inputParams->prob_cond, "project_lp") == 0)
                 projectQ(ctx, *inputParams);
+            else if (strcmp(inputParams->prob_cond, "kl") == 0)
+                for (int b = 0; b < TOTAL_BALLOTS; b++)
+                    if (KL_project_ctx(ctx, b) != 0)
+                        LPW_ctx(ctx, b);
             else if (strcmp(inputParams->prob_cond, "lp") == 0)
                 for (int b = 0; b < TOTAL_BALLOTS; b++)
                     LPW_ctx(ctx, b);
@@ -849,6 +856,13 @@ results:
     if (strcmp(inputParams->prob_cond, "project_lp") == 0) // Si, prob_cond == project_lp
     {
         projectQ(ctx, *inputParams);
+        getP(ctx); // M-Step
+    }
+    else if (strcmp(inputParams->prob_cond, "kl") == 0)
+    {
+        for (int b = 0; b < TOTAL_BALLOTS; b++)
+            if (KL_project_ctx(ctx, b) != 0)
+                LPW_ctx(ctx, b);
         getP(ctx); // M-Step
     }
     else if (strcmp(inputParams->prob_cond, "lp") == 0)

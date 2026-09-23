@@ -226,9 +226,9 @@ eim <- function(X = NULL, W = NULL, json_path = NULL) {
 #'
 #' @param compute_ll An optional boolean indicating whether to compute the log-likelihood at each iteration. The default value is `TRUE`.
 #'
-#' @param adjust_prob_cond_method An optional string indicating the method to adjust the conditional probability so that for each candidate, the sum product of voters and conditional probabilities across groups equals the votes obtained by the candidate. It can take values: `""` if no adjusting is made, `"lp"` if the adjustment is based on a linear programming that penalizes with L1-norm, `"project_lp"` if the adjustment is performed using projection and linear programming (this is the default)
+#' @param adjust_prob_cond_method An optional string indicating the method used to adjust the conditional probabilities so that, for each candidate, the sum of the products of the number of voters and the conditional probabilities across groups equals the number of votes obtained by that candidate. It can take the following values: `""` if no adjustment is made; `"lp"` if the adjustment is based on a linear program that penalizes using the L1 norm; `"kl"` if the estimated-count table is projected in KL divergence using iterative proportional fitting; or `"project_lp"` if it is projected onto the accounting-identity hyperplane and an LP is solved when a probability is negative. The default is `"lp"` for Joint-EM (`symmetric = TRUE` and `symmetric_weight_method = "joint"`) and `"project_lp"` otherwise. `"project_lp"` is not supported in Joint-EM: requesting it issues a warning and runs `"lp"` instead. In the other modes, it retains the projection-plus-LP adjustment.
 #'
-#' @param adjust_prob_cond_every An optional boolean indicating whether to adjust the conditional probability on every iteration (if `TRUE`), or only at the conditional probabilities obtained at the end of the EM algorithm (if `FALSE`, this is the default). This parameter applies only if `adjust_prob_conditional_method` is `lp` or `project_lp`.
+#' @param adjust_prob_cond_every An optional boolean indicating whether to adjust the conditional probability on every iteration (if `TRUE`), or only at the conditional probabilities obtained at the end of the EM algorithm (if `FALSE`, this is the default). This parameter applies only if `adjust_prob_conditional_method` is `lp`, `kl`, or `project_lp`.
 #'
 #' @param verbose An optional boolean indicating whether to print informational messages during the EM
 #'   iterations. The default value is `FALSE`.
@@ -265,7 +265,7 @@ eim <- function(X = NULL, W = NULL, json_path = NULL) {
 #' @param ... Added for compability
 #'
 #' @references
-#' [Thraves, C., Ubilla, P. and Hermosilla, D.: *"Fast Ecological Inference Algorithm for the RxC Case"*](https://papers.ssrn.com/sol3/papers.cfm?abstract_id=4832834). Aditionally, the MVN CDF is computed by the methods introduced in [Genz, A. (2000). Numerical computation of multivariate normal probabilities. *Journal of Computational and Graphical Statistics*](https://www.researchgate.net/publication/2463953_Numerical_Computation_Of_Multivariate_Normal_Probabilities)
+#' [Ubilla Pavez, P., Hermosilla, D. and Thraves, C. (2026): *"An accurate, fast, and scalable ecological inference algorithm for the R×C case"*. Statistics and Computing, 36, Article 195.](https://link.springer.com/article/10.1007/s11222-026-10946-1). Aditionally, the MVN CDF is computed by the methods introduced in [Genz, A. (2000). Numerical computation of multivariate normal probabilities. *Journal of Computational and Graphical Statistics*](https://www.researchgate.net/publication/2463953_Numerical_Computation_Of_Multivariate_Normal_Probabilities)
 #'
 #' @note
 #' This function can be executed using one of three mutually exclusive approaches:
@@ -395,6 +395,21 @@ run_em <- function(object = NULL,
     base_call <- match.call()
     all_params <- lapply(as.list(match.call(expand.dots = TRUE)), eval, parent.frame())
     .validate_compute(all_params) # nolint
+
+    if (isTRUE(symmetric) && identical(symmetric_weight_method, "joint")) {
+        if (!("adjust_prob_cond_method" %in% names(all_params))) {
+            adjust_prob_cond_method <- "lp"
+            all_params$adjust_prob_cond_method <- adjust_prob_cond_method
+        } else if (identical(adjust_prob_cond_method, "project_lp")) {
+            warning(
+                "'project_lp' is not supported in 'joint_em'. Running the default with 'lp'.",
+                call. = FALSE,
+                immediate. = TRUE
+            )
+            adjust_prob_cond_method <- "lp"
+            all_params$adjust_prob_cond_method <- adjust_prob_cond_method
+        }
+    }
 
     if (!is.null(seed)) {
         set.seed(seed)
@@ -649,6 +664,7 @@ bootstrap <- function(object = NULL,
 #'
 #' This function estimates the voting probabilities (computed using [run_em]) aggregating adjacent groups so that the estimated probabilities' standard deviation (computed using [bootstrap]) is below a given threshold. See **Details** for more information.
 #'
+#' @details
 #' Groups need to have an order relation so that adjacent groups can be merged. Groups of consecutive column indices in the matrix W are considered adjacent. For example, consider the following seven groups defined by voters' age ranges: 20-29, 30-39, 40-49, 50-59, 60-69, 70-79, and 80+. A possible group aggregation can be a macro-group composed of the three following age ranges: 20-39, 40-59, and 60+. Since there are multiple group aggregations, even for a fixed number of macro-groups, a Dynamic Program (DP) mechanism is used to find the group aggregation that maximizes the sum of the standard deviation of the macro-groups proportions among ballot boxes for a specific number of macro-groups. If no group aggregation standard deviation statistic meets the threshold condition, `NULL` is returned.
 #'
 #' To find the best group aggregation, the function runs the DP iteratively, starting with all groups (this case is trivial since the group aggregation is such that all macro-groups match exactly the original groups). If the standard deviation statistic (`sd_statistic`) is below the threshold (`sd_threshold`), it stops. Otherwise, it runs the DP such that the number of macro-groups is one unit less than the original number of macro-groups. If the standard deviation statistic is below the threshold, it stops. This continues until either the algorithm stops, or until no group aggregation obtained by the DP satisfies the threshold condition. If the former holds, then the last group aggregation obtained (before stopping) is returned; while if the latter holds, then no output is returned unless the user sets the input parameter `feasible=FALSE`, in which case it returns the group aggregation that has the least standard deviation statistic, among the group-aggregations obtained from the DP.
@@ -900,6 +916,7 @@ get_agg_proxy <- function(object = NULL,
 #' the one that achieves the higher likelihood as long as the standard deviation (computed using [bootstrap]) of the estimated probabilities
 #' is below a given threshold. See **Details** for more informacion on adjacent groups.
 #'
+#' @details
 #' Groups of consecutive column indices in the matrix `W` are considered adjacent. For example, consider the following seven groups defined by voters' age
 #' ranges: 20-29, 30-39, 40-49, 50-59, 60-69, 70-79, and 80+. A possible group aggregation can be a macro-group composed of the three following age
 #' ranges: 20-39, 40-59, and 60+. Since there are multiple group aggregations, the method evaluates all possible group aggregations (merging only adjacent groups).

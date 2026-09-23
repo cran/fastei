@@ -169,7 +169,7 @@
         stop("Invalid 'alternative'. Must be one of: two.sided, greater, less")
     }
 
-    valid_lp_methods <- c("", "lp", "project_lp")
+    valid_lp_methods <- c("", "lp", "kl", "project_lp")
     if ("adjust_prob_cond_method" %in% names(args) &&
         (!is.character(args$adjust_prob_cond_method) || !(args$adjust_prob_cond_method %in% valid_lp_methods))) {
         stop("Invalid 'adjust_prob_cond_method'. Must be one of: ", paste(valid_lp_methods, collapse = ", "))
@@ -339,6 +339,45 @@
     probabilities <- sweep(numerator, 1, denominator, "/")
 
     .normalize_prob_rows(probabilities)
+}
+
+#' Internal function!
+#'
+#' Repair EM outputs for ballot boxes with zero totals.
+#'
+#' @param object An `eim` object containing EM outputs.
+#' @param W_matrix The group matrix used by the fitted model.
+#' @return The fitted object with finite, internally consistent outputs.
+#' @noRd
+.run_em_fix_zero_ballot_outputs <- function(object, W_matrix) {
+    zero_ballots <- rowSums(W_matrix) == 0 | rowSums(object$X) == 0
+    needs_fix <- any(zero_ballots) ||
+        any(!is.finite(object$cond_prob)) ||
+        any(!is.finite(object$expected_outcome)) ||
+        any(!is.finite(object$prob))
+
+    if (!needs_fix) {
+        return(object)
+    }
+
+    for (ballot in which(zero_ballots)) {
+        object$cond_prob[, , ballot] <- 0
+    }
+    object$cond_prob[!is.finite(object$cond_prob)] <- 0
+
+    expected_bgc <- sweep(
+        aperm(object$cond_prob, c(3, 1, 2)),
+        c(1, 2),
+        W_matrix,
+        "*"
+    )
+    object$expected_outcome <- aperm(expected_bgc, c(2, 3, 1))
+    dimnames(object$expected_outcome) <- .run_em_dimnames(object, W_matrix)
+
+    object$prob <- .mstep_from_q(object$cond_prob, W_matrix)
+    dimnames(object$prob) <- list(colnames(W_matrix), colnames(object$X))
+
+    object
 }
 
 #' Internal function!
@@ -791,6 +830,7 @@
     )
 
     object <- .run_em_assign_results(object, resulting_values, W_matrix, control)
+    object <- .run_em_fix_zero_ballot_outputs(object, W_matrix)
     if (control$symmetric && identical(control$symmetric_weight_method, "joint")) {
         return(.run_em_finalize_joint(object))
     }
@@ -801,7 +841,8 @@
     inverse_call <- .run_em_inverse_call(control$base_call, object, control$all_params)
     inverse <- eval(inverse_call, control$caller_env)
 
-    .run_em_apply_symmetry(object, inverse, control)
+    object <- .run_em_apply_symmetry(object, inverse, control)
+    .run_em_fix_zero_ballot_outputs(object, W_matrix)
 }
 
 #' Internal function!
